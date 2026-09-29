@@ -1,15 +1,14 @@
 import React, { useState } from 'react';
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
-  LineChart, Line, AreaChart, Area
+  LineChart, Line
 } from 'recharts';
 import {
   LayoutDashboard, CreditCard, Wallet, FileText, Building, Users,
-  Settings, Bell, Search, Filter, Download, Eye, CheckCircle, XCircle,
+  Bell, Search, Filter, Download, Eye, CheckCircle, XCircle,
   AlertTriangle, Clock, TrendingUp, DollarSign, Activity, LogOut,
-  Menu, ChevronDown, Plus, Trash2, Edit, Zap, Smartphone, Monitor,
-  Landmark, Send, ShieldCheck, ArrowRight, ArrowUpRight, ArrowDownLeft,
-  Receipt, Sparkles, RefreshCw, Check, Phone, Shield
+  Menu, Plus, Trash2, Edit, Zap, Smartphone, Monitor,
+  Landmark, Send, Receipt, X
 } from 'lucide-react';
 import BBPSModule from './components/BBPSModule';
 import AssistedBankingModule from './components/AssistedBankingModule';
@@ -18,6 +17,7 @@ import ReceiptModal from './components/ReceiptModal';
 const App = () => {
   const [activeModule, setActiveModule] = useState('dashboard');
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [userRole, setUserRole] = useState('merchant'); // 'admin' or 'merchant'
   const [activeReceipt, setActiveReceipt] = useState(null);
   const [bankingInitialAction, setBankingInitialAction] = useState('overview');
@@ -76,7 +76,7 @@ const App = () => {
     { id: 'M004', name: 'DEF Market', businessType: 'Supermarket', balance: 22300, devices: 3, transactions: 201 }
   ];
 
-  const [chartData, setChartData] = useState([
+  const [chartData] = useState([
     { name: 'Mon', transactions: 45, revenue: 12500 },
     { name: 'Tue', transactions: 52, revenue: 18900 },
     { name: 'Wed', transactions: 38, revenue: 14200 },
@@ -88,14 +88,14 @@ const App = () => {
 
   const getStatusColor = (status) => {
     switch (status) {
-      case 'success': return 'text-green-600 bg-green-100';
-      case 'failed': return 'text-red-600 bg-red-100';
-      case 'pending': return 'text-yellow-600 bg-yellow-100';
-      case 'processing': return 'text-blue-600 bg-blue-100';
-      case 'completed': return 'text-green-600 bg-green-100';
-      case 'online': return 'text-green-600 bg-green-100';
-      case 'offline': return 'text-red-600 bg-red-100';
-      default: return 'text-gray-600 bg-gray-100';
+      case 'success': return 'text-green-700 bg-green-100';
+      case 'failed': return 'text-red-700 bg-red-100';
+      case 'pending': return 'text-yellow-800 bg-yellow-100';
+      case 'processing': return 'text-blue-700 bg-blue-100';
+      case 'completed': return 'text-green-700 bg-green-100';
+      case 'online': return 'text-green-700 bg-green-100';
+      case 'offline': return 'text-red-700 bg-red-100';
+      default: return 'text-gray-700 bg-gray-100';
     }
   };
 
@@ -103,11 +103,9 @@ const App = () => {
   // Central State Updaters for Services (POS, BBPS, DMT, Transfers)
   // ------------------------------------------------------------------
 
-  // Handler when POS transaction (e.g. ₹1,00,000) completes
   const handlePosSuccess = (posTxn) => {
     const amount = Number(posTxn.amount) || 100000;
 
-    // 1. Update wallet balance and dashboard metrics
     setDashboardData(prev => ({
       ...prev,
       availableBalance: prev.availableBalance + amount,
@@ -116,7 +114,6 @@ const App = () => {
       posTransactions: (prev.posTransactions || 0) + 1
     }));
 
-    // 2. Add to wallet transactions (+₹1,00,000 POS Credit)
     setWalletTransactions(prev => [
       {
         id: `WTX-${posTxn.id.slice(-6)}`,
@@ -129,27 +126,22 @@ const App = () => {
       ...prev
     ]);
 
-    // 3. Add to unified transactions history
     setTransactions(prev => [posTxn, ...prev]);
 
-    // 4. Increment transaction count on the selected POS device
     if (posTxn.terminalId) {
       setPosDevices(prev => prev.map(d =>
         d.id === posTxn.terminalId ? { ...d, transactions: d.transactions + 1 } : d
       ));
     }
 
-    // 5. Open receipt modal
     setActiveReceipt(posTxn);
   };
 
-  // Handler when Transfer / DMT to Beneficiary completes
   const handleTransferSuccess = (transferTxn) => {
     const amount = Number(transferTxn.amount) || 50000;
     const fee = Number(transferTxn.fee) || 10;
     const totalDebit = amount + fee;
 
-    // 1. Debit from wallet balance
     setDashboardData(prev => ({
       ...prev,
       availableBalance: Math.max(0, prev.availableBalance - totalDebit),
@@ -157,7 +149,6 @@ const App = () => {
       moneyTransfers: (prev.moneyTransfers || 0) + 1
     }));
 
-    // 2. Add to wallet transactions
     setWalletTransactions(prev => [
       {
         id: `WTX-${transferTxn.id.slice(-6)}`,
@@ -170,18 +161,14 @@ const App = () => {
       ...prev
     ]);
 
-    // 3. Add to unified transactions history
     setTransactions(prev => [transferTxn, ...prev]);
 
-    // 4. Open receipt modal
     setActiveReceipt(transferTxn);
   };
 
-  // Handler when BBPS Bill / Recharge payment completes
   const handleBbpsPaymentSuccess = (bbpsTxn) => {
     const amount = Number(bbpsTxn.amount) || 0;
 
-    // 1. Update wallet balance and stats
     setDashboardData(prev => ({
       ...prev,
       availableBalance: Math.max(0, prev.availableBalance - amount),
@@ -190,7 +177,6 @@ const App = () => {
       bbpsTransactions: (prev.bbpsTransactions || 0) + 1
     }));
 
-    // 2. Add to wallet transactions
     setWalletTransactions(prev => [
       {
         id: `WTX-${bbpsTxn.id.slice(-6)}`,
@@ -203,17 +189,20 @@ const App = () => {
       ...prev
     ]);
 
-    // 3. Add to unified transactions history
     setTransactions(prev => [bbpsTxn, ...prev]);
 
-    // 4. Open receipt modal
     setActiveReceipt(bbpsTxn);
   };
 
-  // Launch transfer flow directly from receipt modal or wallet
   const handleLaunchTransferFunds = () => {
     setActiveModule('banking');
     setBankingInitialAction('transfer');
+  };
+
+  const handleNavigate = (moduleId, bankingAction = 'overview') => {
+    setActiveModule(moduleId);
+    if (moduleId === 'banking') setBankingInitialAction(bankingAction);
+    setMobileMenuOpen(false);
   };
 
   // ------------------------------------------------------------------
@@ -221,33 +210,34 @@ const App = () => {
   // ------------------------------------------------------------------
 
   const renderDashboard = () => (
-    <div className="space-y-6">
-      <div className="flex flex-col sm:flex-row justify-between sm:items-center gap-4">
+    <div className="space-y-4 sm:space-y-6">
+      {/* Header & Quick Action Buttons */}
+      <div className="flex flex-col sm:flex-row justify-between sm:items-center gap-3 sm:gap-4">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">Dashboard</h1>
+          <h1 className="text-xl sm:text-2xl font-bold text-gray-900 tracking-tight">Dashboard</h1>
           <p className="text-xs text-gray-500 mt-0.5">Welcome back, John Doe • ReachPay Business Terminal</p>
         </div>
-        <div className="flex flex-wrap items-center gap-2">
+        <div className="flex flex-col sm:flex-row flex-wrap items-stretch sm:items-center gap-2 w-full sm:w-auto">
           <button
             onClick={() => {
               setActiveModule('banking');
               setBankingInitialAction('pos');
             }}
-            className="px-3.5 py-2 bg-gradient-to-r from-blue-600 to-indigo-600 text-white rounded-lg hover:from-blue-700 hover:to-indigo-700 text-xs font-semibold shadow-xs flex items-center gap-1.5"
+            className="px-3.5 py-2.5 bg-gradient-to-r from-blue-600 to-indigo-600 text-white rounded-lg hover:from-blue-700 hover:to-indigo-700 text-xs font-semibold shadow-xs flex items-center justify-center gap-1.5 min-h-[44px] sm:min-h-0"
           >
             <CreditCard className="w-3.5 h-3.5" />
             <span>Simulate ₹1,00,000 POS</span>
           </button>
           <button
             onClick={() => setActiveModule('bbps')}
-            className="px-3.5 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 text-xs font-semibold shadow-xs flex items-center gap-1.5"
+            className="px-3.5 py-2.5 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 text-xs font-semibold shadow-xs flex items-center justify-center gap-1.5 min-h-[44px] sm:min-h-0"
           >
             <Zap className="w-3.5 h-3.5" />
             <span>BBPS Bill Pay</span>
           </button>
           <button
             onClick={() => setActiveModule('reports')}
-            className="px-3.5 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 text-xs font-semibold"
+            className="px-3.5 py-2.5 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 text-xs font-semibold flex items-center justify-center min-h-[44px] sm:min-h-0"
           >
             Generate Report
           </button>
@@ -255,61 +245,61 @@ const App = () => {
       </div>
 
       {/* Main Stats Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-        <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-6">
+        <div className="bg-white p-4 sm:p-6 rounded-xl shadow-xs border border-gray-200">
           <div className="flex items-center justify-between">
-            <div>
-              <p className="text-sm font-medium text-gray-600">Total Volume</p>
-              <p className="text-2xl font-bold text-gray-900">₹{dashboardData.totalVolume.toLocaleString('en-IN')}</p>
+            <div className="min-w-0">
+              <p className="text-xs sm:text-sm font-medium text-gray-600 truncate">Total Volume</p>
+              <p className="text-xl sm:text-2xl font-bold text-gray-900 mt-1">₹{dashboardData.totalVolume.toLocaleString('en-IN')}</p>
             </div>
-            <div className="p-3 bg-blue-100 rounded-full">
-              <TrendingUp className="w-6 h-6 text-blue-600" />
+            <div className="p-3 bg-blue-100 rounded-xl shrink-0">
+              <TrendingUp className="w-5 h-5 sm:w-6 sm:h-6 text-blue-600" />
             </div>
           </div>
         </div>
 
-        <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200">
+        <div className="bg-white p-4 sm:p-6 rounded-xl shadow-xs border border-gray-200">
           <div className="flex items-center justify-between">
-            <div>
-              <p className="text-sm font-medium text-gray-600">Today's Transactions</p>
-              <p className="text-2xl font-bold text-gray-900">{dashboardData.todayTransactions}</p>
+            <div className="min-w-0">
+              <p className="text-xs sm:text-sm font-medium text-gray-600 truncate">Today's Transactions</p>
+              <p className="text-xl sm:text-2xl font-bold text-gray-900 mt-1">{dashboardData.todayTransactions}</p>
             </div>
-            <div className="p-3 bg-green-100 rounded-full">
-              <Activity className="w-6 h-6 text-green-600" />
+            <div className="p-3 bg-green-100 rounded-xl shrink-0">
+              <Activity className="w-5 h-5 sm:w-6 sm:h-6 text-green-600" />
             </div>
           </div>
         </div>
 
-        <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200">
+        <div className="bg-white p-4 sm:p-6 rounded-xl shadow-xs border border-gray-200">
           <div className="flex items-center justify-between">
-            <div>
-              <p className="text-sm font-medium text-gray-600">Available Balance</p>
-              <p className="text-2xl font-bold text-gray-900">₹{dashboardData.availableBalance.toLocaleString('en-IN')}</p>
+            <div className="min-w-0">
+              <p className="text-xs sm:text-sm font-medium text-gray-600 truncate">Available Balance</p>
+              <p className="text-xl sm:text-2xl font-bold text-gray-900 mt-1">₹{dashboardData.availableBalance.toLocaleString('en-IN')}</p>
             </div>
-            <div className="p-3 bg-purple-100 rounded-full">
-              <Wallet className="w-6 h-6 text-purple-600" />
+            <div className="p-3 bg-purple-100 rounded-xl shrink-0">
+              <Wallet className="w-5 h-5 sm:w-6 sm:h-6 text-purple-600" />
             </div>
           </div>
         </div>
 
-        <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200">
+        <div className="bg-white p-4 sm:p-6 rounded-xl shadow-xs border border-gray-200">
           <div className="flex items-center justify-between">
-            <div>
-              <p className="text-sm font-medium text-gray-600">Pending Settlement</p>
-              <p className="text-2xl font-bold text-gray-900">₹{dashboardData.pendingSettlement.toLocaleString('en-IN')}</p>
+            <div className="min-w-0">
+              <p className="text-xs sm:text-sm font-medium text-gray-600 truncate">Pending Settlement</p>
+              <p className="text-xl sm:text-2xl font-bold text-gray-900 mt-1">₹{dashboardData.pendingSettlement.toLocaleString('en-IN')}</p>
             </div>
-            <div className="p-3 bg-orange-100 rounded-full">
-              <Clock className="w-6 h-6 text-orange-600" />
+            <div className="p-3 bg-orange-100 rounded-xl shrink-0">
+              <Clock className="w-5 h-5 sm:w-6 sm:h-6 text-orange-600" />
             </div>
           </div>
         </div>
       </div>
 
       {/* Services Performance Strip */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
         <div
           onClick={() => setActiveModule('bbps')}
-          className="bg-white p-4 rounded-xl border border-gray-200 hover:border-blue-400 hover:shadow-xs transition-all cursor-pointer"
+          className="bg-white p-3.5 sm:p-4 rounded-xl border border-gray-200 hover:border-blue-400 hover:shadow-xs transition-all cursor-pointer"
         >
           <div className="flex items-center justify-between text-xs text-gray-500 mb-1">
             <span>BBPS Bill Pay</span>
@@ -324,7 +314,7 @@ const App = () => {
             setActiveModule('banking');
             setBankingInitialAction('pos');
           }}
-          className="bg-white p-4 rounded-xl border border-gray-200 hover:border-blue-400 hover:shadow-xs transition-all cursor-pointer"
+          className="bg-white p-3.5 sm:p-4 rounded-xl border border-gray-200 hover:border-blue-400 hover:shadow-xs transition-all cursor-pointer"
         >
           <div className="flex items-center justify-between text-xs text-gray-500 mb-1">
             <span>POS Assisted</span>
@@ -339,7 +329,7 @@ const App = () => {
             setActiveModule('banking');
             setBankingInitialAction('transfer');
           }}
-          className="bg-white p-4 rounded-xl border border-gray-200 hover:border-blue-400 hover:shadow-xs transition-all cursor-pointer"
+          className="bg-white p-3.5 sm:p-4 rounded-xl border border-gray-200 hover:border-blue-400 hover:shadow-xs transition-all cursor-pointer"
         >
           <div className="flex items-center justify-between text-xs text-gray-500 mb-1">
             <span>Money Transfers</span>
@@ -351,7 +341,7 @@ const App = () => {
 
         <div
           onClick={() => setActiveModule('bbps')}
-          className="bg-white p-4 rounded-xl border border-gray-200 hover:border-blue-400 hover:shadow-xs transition-all cursor-pointer"
+          className="bg-white p-3.5 sm:p-4 rounded-xl border border-gray-200 hover:border-blue-400 hover:shadow-xs transition-all cursor-pointer"
         >
           <div className="flex items-center justify-between text-xs text-gray-500 mb-1">
             <span>Recharges</span>
@@ -363,39 +353,43 @@ const App = () => {
       </div>
 
       {/* Charts */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200">
-          <h3 className="text-lg font-semibold text-gray-900 mb-4">Transaction Volume</h3>
-          <ResponsiveContainer width="100%" height={300}>
-            <BarChart data={chartData}>
-              <CartesianGrid strokeDasharray="3 3" />
-              <XAxis dataKey="name" />
-              <YAxis />
-              <Tooltip />
-              <Bar dataKey="transactions" fill="#3B82F6" />
-            </BarChart>
-          </ResponsiveContainer>
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 sm:gap-6">
+        <div className="bg-white p-4 sm:p-6 rounded-xl shadow-xs border border-gray-200 min-w-0 overflow-hidden">
+          <h3 className="text-base sm:text-lg font-semibold text-gray-900 mb-3 sm:mb-4">Transaction Volume</h3>
+          <div className="h-[240px] sm:h-[280px] lg:h-[300px] w-full">
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={chartData}>
+                <CartesianGrid strokeDasharray="3 3" />
+                <XAxis dataKey="name" tick={{ fontSize: 12 }} />
+                <YAxis tick={{ fontSize: 12 }} />
+                <Tooltip />
+                <Bar dataKey="transactions" fill="#3B82F6" radius={[4, 4, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
         </div>
 
-        <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200">
-          <h3 className="text-lg font-semibold text-gray-900 mb-4">Revenue Trends</h3>
-          <ResponsiveContainer width="100%" height={300}>
-            <LineChart data={chartData}>
-              <CartesianGrid strokeDasharray="3 3" />
-              <XAxis dataKey="name" />
-              <YAxis />
-              <Tooltip />
-              <Line type="monotone" dataKey="revenue" stroke="#10B981" strokeWidth={2} />
-            </LineChart>
-          </ResponsiveContainer>
+        <div className="bg-white p-4 sm:p-6 rounded-xl shadow-xs border border-gray-200 min-w-0 overflow-hidden">
+          <h3 className="text-base sm:text-lg font-semibold text-gray-900 mb-3 sm:mb-4">Revenue Trends</h3>
+          <div className="h-[240px] sm:h-[280px] lg:h-[300px] w-full">
+            <ResponsiveContainer width="100%" height="100%">
+              <LineChart data={chartData}>
+                <CartesianGrid strokeDasharray="3 3" />
+                <XAxis dataKey="name" tick={{ fontSize: 12 }} />
+                <YAxis tick={{ fontSize: 12 }} />
+                <Tooltip />
+                <Line type="monotone" dataKey="revenue" stroke="#10B981" strokeWidth={2.5} />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
         </div>
       </div>
 
       {/* Recent Activity */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 sm:gap-6">
+        <div className="bg-white p-4 sm:p-6 rounded-xl shadow-xs border border-gray-200">
           <div className="flex justify-between items-center mb-4">
-            <h3 className="text-lg font-semibold text-gray-900">Recent Transactions</h3>
+            <h3 className="text-base sm:text-lg font-semibold text-gray-900">Recent Transactions</h3>
             <button
               onClick={() => setActiveModule('transactions')}
               className="text-xs font-semibold text-blue-600 hover:text-blue-800"
@@ -403,16 +397,16 @@ const App = () => {
               View All ({transactions.length}) →
             </button>
           </div>
-          <div className="space-y-3">
+          <div className="space-y-2.5">
             {transactions.slice(0, 5).map((tx) => (
-              <div key={tx.id} className="flex justify-between items-center p-3 bg-gray-50 rounded-lg">
-                <div>
-                  <p className="font-medium text-gray-900">{tx.id}</p>
-                  <p className="text-sm text-gray-600">{tx.customer || tx.beneficiary || 'Customer'}</p>
+              <div key={tx.id} className="flex justify-between items-center p-3 bg-gray-50 rounded-lg hover:bg-gray-100/70 transition-colors">
+                <div className="min-w-0 pr-2">
+                  <p className="font-semibold text-xs sm:text-sm text-gray-900 truncate">{tx.id}</p>
+                  <p className="text-xs text-gray-500 truncate">{tx.customer || tx.beneficiary || 'Customer'}</p>
                 </div>
-                <div className="text-right">
-                  <p className="font-medium">₹{Number(tx.amount || 0).toLocaleString('en-IN')}</p>
-                  <span className={`inline-flex px-2 py-1 text-xs rounded-full ${getStatusColor(tx.status)}`}>
+                <div className="text-right shrink-0">
+                  <p className="font-bold text-xs sm:text-sm text-gray-900">₹{Number(tx.amount || 0).toLocaleString('en-IN')}</p>
+                  <span className={`inline-flex px-2 py-0.5 text-[10px] sm:text-xs rounded-full font-semibold ${getStatusColor(tx.status)}`}>
                     {tx.status}
                   </span>
                 </div>
@@ -421,9 +415,9 @@ const App = () => {
           </div>
         </div>
 
-        <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200">
+        <div className="bg-white p-4 sm:p-6 rounded-xl shadow-xs border border-gray-200">
           <div className="flex justify-between items-center mb-4">
-            <h3 className="text-lg font-semibold text-gray-900">POS Status</h3>
+            <h3 className="text-base sm:text-lg font-semibold text-gray-900">POS Status</h3>
             <button
               onClick={() => setActiveModule('pos')}
               className="text-xs font-semibold text-blue-600 hover:text-blue-800"
@@ -432,21 +426,21 @@ const App = () => {
             </button>
           </div>
           <div className="space-y-3">
-            <div className="flex justify-between items-center">
+            <div className="flex justify-between items-center text-sm">
               <span className="text-gray-600">Active Devices</span>
-              <span className="font-semibold text-green-600">{dashboardData.activeDevices}</span>
+              <span className="font-bold text-green-600">{dashboardData.activeDevices} Online</span>
             </div>
-            <div className="flex justify-between items-center">
+            <div className="flex justify-between items-center text-sm">
               <span className="text-gray-600">Offline Devices</span>
-              <span className="font-semibold text-red-600">{dashboardData.offlineDevices}</span>
+              <span className="font-bold text-red-600">{dashboardData.offlineDevices} Needs Attention</span>
             </div>
-            <div className="mt-4">
+            <div className="mt-4 pt-2 border-t border-gray-100">
               <div className="flex justify-between items-center mb-2">
-                <span className="text-sm text-gray-600">Device Health</span>
-                <span className="text-sm font-medium">85%</span>
+                <span className="text-xs text-gray-600">Device Fleet Health</span>
+                <span className="text-xs font-bold text-gray-900">85% Optimal</span>
               </div>
-              <div className="w-full bg-gray-200 rounded-full h-2">
-                <div className="bg-green-500 h-2 rounded-full" style={{ width: '85%' }}></div>
+              <div className="w-full bg-gray-200 rounded-full h-2 overflow-hidden">
+                <div className="bg-emerald-500 h-2 rounded-full" style={{ width: '85%' }}></div>
               </div>
             </div>
           </div>
@@ -456,16 +450,16 @@ const App = () => {
   );
 
   const renderWallet = () => (
-    <div className="space-y-6">
-      <div className="flex flex-col sm:flex-row justify-between sm:items-center gap-4">
+    <div className="space-y-4 sm:space-y-6">
+      <div className="flex flex-col sm:flex-row justify-between sm:items-center gap-3 sm:gap-4">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">Wallet Management</h1>
+          <h1 className="text-xl sm:text-2xl font-bold text-gray-900">Wallet Management</h1>
           <p className="text-xs text-gray-500 mt-0.5">Manage merchant funds, POS settlements, and bank transfers</p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-col sm:flex-row gap-2 w-full sm:w-auto">
           <button
             onClick={handleLaunchTransferFunds}
-            className="px-4 py-2 bg-gradient-to-r from-blue-600 to-indigo-600 text-white rounded-lg hover:from-blue-700 hover:to-indigo-700 transition-all text-xs font-semibold shadow-xs flex items-center gap-1.5"
+            className="px-4 py-2.5 bg-gradient-to-r from-blue-600 to-indigo-600 text-white rounded-lg hover:from-blue-700 hover:to-indigo-700 transition-all text-xs font-semibold shadow-xs flex items-center justify-center gap-1.5 min-h-[44px] sm:min-h-0"
           >
             <Send className="w-3.5 h-3.5" />
             <span>Transfer Funds to Bank</span>
@@ -485,7 +479,7 @@ const App = () => {
                 ...prev
               ]);
             }}
-            className="px-4 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition-colors text-xs font-semibold flex items-center gap-1"
+            className="px-4 py-2.5 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition-colors text-xs font-semibold flex items-center justify-center gap-1 min-h-[44px] sm:min-h-0"
           >
             <Plus className="w-3.5 h-3.5" />
             <span>Add Funds</span>
@@ -494,38 +488,38 @@ const App = () => {
       </div>
 
       {/* Wallet Balance Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-        <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-6">
+        <div className="bg-white p-4 sm:p-6 rounded-xl shadow-xs border border-gray-200">
           <div className="flex items-center justify-between">
             <div>
-              <p className="text-sm font-medium text-gray-600">Available Balance</p>
-              <p className="text-2xl font-bold text-gray-900">₹{dashboardData.availableBalance.toLocaleString('en-IN')}</p>
+              <p className="text-xs sm:text-sm font-medium text-gray-600">Available Balance</p>
+              <p className="text-xl sm:text-2xl font-bold text-gray-900 mt-1">₹{dashboardData.availableBalance.toLocaleString('en-IN')}</p>
             </div>
-            <div className="p-3 bg-green-100 rounded-full">
+            <div className="p-3 bg-green-100 rounded-xl">
               <Wallet className="w-6 h-6 text-green-600" />
             </div>
           </div>
         </div>
 
-        <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200">
+        <div className="bg-white p-4 sm:p-6 rounded-xl shadow-xs border border-gray-200">
           <div className="flex items-center justify-between">
             <div>
-              <p className="text-sm font-medium text-gray-600">Pending Balance</p>
-              <p className="text-2xl font-bold text-gray-900">₹{dashboardData.pendingSettlement.toLocaleString('en-IN')}</p>
+              <p className="text-xs sm:text-sm font-medium text-gray-600">Pending Balance</p>
+              <p className="text-xl sm:text-2xl font-bold text-gray-900 mt-1">₹{dashboardData.pendingSettlement.toLocaleString('en-IN')}</p>
             </div>
-            <div className="p-3 bg-yellow-100 rounded-full">
+            <div className="p-3 bg-yellow-100 rounded-xl">
               <Clock className="w-6 h-6 text-yellow-600" />
             </div>
           </div>
         </div>
 
-        <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200">
+        <div className="bg-white p-4 sm:p-6 rounded-xl shadow-xs border border-gray-200 sm:col-span-2 lg:col-span-1">
           <div className="flex items-center justify-between">
             <div>
-              <p className="text-sm font-medium text-gray-600">Total Earnings</p>
-              <p className="text-2xl font-bold text-gray-900">₹156,780</p>
+              <p className="text-xs sm:text-sm font-medium text-gray-600">Total Earnings</p>
+              <p className="text-xl sm:text-2xl font-bold text-gray-900 mt-1">₹156,780</p>
             </div>
-            <div className="p-3 bg-blue-100 rounded-full">
+            <div className="p-3 bg-blue-100 rounded-xl">
               <DollarSign className="w-6 h-6 text-blue-600" />
             </div>
           </div>
@@ -533,33 +527,56 @@ const App = () => {
       </div>
 
       {/* Transaction History */}
-      <div className="bg-white rounded-xl shadow-sm border border-gray-200">
-        <div className="p-6 border-b border-gray-200 flex justify-between items-center">
-          <h3 className="text-lg font-semibold text-gray-900">Wallet Activity & Settlement History</h3>
-          <span className="text-xs text-gray-500">{walletTransactions.length} records</span>
+      <div className="bg-white rounded-xl shadow-xs border border-gray-200 overflow-hidden">
+        <div className="p-4 sm:p-6 border-b border-gray-200 flex justify-between items-center">
+          <h3 className="text-base sm:text-lg font-semibold text-gray-900">Wallet Activity & History</h3>
+          <span className="text-xs text-gray-500 font-medium">{walletTransactions.length} records</span>
         </div>
-        <div className="overflow-x-auto">
-          <table className="w-full">
+
+        {/* Mobile Cards View */}
+        <div className="md:hidden divide-y divide-gray-100">
+          {walletTransactions.map((tx) => (
+            <div key={tx.id} className="p-4 space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-mono font-bold text-gray-900 bg-gray-100 px-2 py-0.5 rounded">{tx.id}</span>
+                <span className={`inline-flex px-2 py-0.5 text-[11px] font-semibold rounded-full ${getStatusColor(tx.status)}`}>
+                  {tx.status}
+                </span>
+              </div>
+              <p className="text-sm font-semibold text-gray-800">{tx.description}</p>
+              <div className="flex items-center justify-between text-xs text-gray-500 pt-1">
+                <span>{tx.date}</span>
+                <span className={`text-sm font-bold ${tx.type === 'credit' ? 'text-green-600' : 'text-red-600'}`}>
+                  {tx.type === 'credit' ? '+' : ''}₹{Math.abs(tx.amount).toLocaleString('en-IN')}
+                </span>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {/* Desktop Table View */}
+        <div className="hidden md:block overflow-x-auto">
+          <table className="w-full min-w-[600px]">
             <thead className="bg-gray-50">
               <tr>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">ID</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Date</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Description</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Amount</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
+                <th className="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">ID</th>
+                <th className="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Date</th>
+                <th className="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Description</th>
+                <th className="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Amount</th>
+                <th className="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Status</th>
               </tr>
             </thead>
             <tbody className="bg-white divide-y divide-gray-200">
               {walletTransactions.map((tx) => (
                 <tr key={tx.id} className="hover:bg-gray-50">
-                  <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">{tx.id}</td>
+                  <td className="px-6 py-4 whitespace-nowrap text-sm font-mono font-semibold text-gray-900">{tx.id}</td>
                   <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{tx.date}</td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{tx.description}</td>
-                  <td className={`px-6 py-4 whitespace-nowrap text-sm font-medium ${tx.type === 'credit' ? 'text-green-600' : 'text-red-600'}`}>
+                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 font-medium">{tx.description}</td>
+                  <td className={`px-6 py-4 whitespace-nowrap text-sm font-bold ${tx.type === 'credit' ? 'text-green-600' : 'text-red-600'}`}>
                     {tx.type === 'credit' ? '+' : ''}₹{Math.abs(tx.amount).toLocaleString('en-IN')}
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap">
-                    <span className={`inline-flex px-2 py-1 text-xs rounded-full ${getStatusColor(tx.status)}`}>
+                    <span className={`inline-flex px-2 py-1 text-xs rounded-full font-semibold ${getStatusColor(tx.status)}`}>
                       {tx.status}
                     </span>
                   </td>
@@ -592,18 +609,18 @@ const App = () => {
     });
 
     return (
-      <div className="space-y-6">
-        <div className="flex flex-col sm:flex-row justify-between sm:items-center gap-4">
+      <div className="space-y-4 sm:space-y-6">
+        <div className="flex flex-col sm:flex-row justify-between sm:items-center gap-3 sm:gap-4">
           <div>
-            <h1 className="text-2xl font-bold text-gray-900">Unified Transactions</h1>
+            <h1 className="text-xl sm:text-2xl font-bold text-gray-900">Unified Transactions</h1>
             <p className="text-xs text-gray-500 mt-0.5">Real-time ledger for POS, BBPS, Recharges, and Money Transfers</p>
           </div>
-          <div className="flex space-x-2">
-            <button className="flex items-center px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 text-xs font-semibold">
+          <div className="flex items-center space-x-2">
+            <button className="flex items-center px-3.5 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 text-xs font-semibold min-h-[40px]">
               <Filter className="w-3.5 h-3.5 mr-1.5" />
               Advanced
             </button>
-            <button className="flex items-center px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-xs font-semibold">
+            <button className="flex items-center px-3.5 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-xs font-semibold min-h-[40px]">
               <Download className="w-3.5 h-3.5 mr-1.5" />
               Export CSV
             </button>
@@ -611,8 +628,8 @@ const App = () => {
         </div>
 
         {/* Filters and Search Bar */}
-        <div className="bg-white p-4 rounded-xl border border-gray-200 flex flex-col md:flex-row gap-3 items-center justify-between">
-          <div className="flex items-center gap-1 overflow-x-auto w-full md:w-auto text-xs font-medium">
+        <div className="bg-white p-3 sm:p-4 rounded-xl border border-gray-200 flex flex-col md:flex-row gap-3 items-stretch md:items-center justify-between">
+          <div className="flex items-center gap-1.5 overflow-x-auto w-full md:w-auto text-xs font-medium pb-1 md:pb-0 scrollbar-none">
             {[
               { id: 'all', label: 'All Transactions' },
               { id: 'pos', label: 'POS Terminal' },
@@ -623,7 +640,7 @@ const App = () => {
               <button
                 key={tab.id}
                 onClick={() => setTxFilter(tab.id)}
-                className={`px-3 py-1.5 rounded-lg whitespace-nowrap transition-colors ${txFilter === tab.id
+                className={`px-3 py-1.5 rounded-lg whitespace-nowrap transition-colors min-h-[36px] flex items-center ${txFilter === tab.id
                   ? 'bg-blue-600 text-white font-semibold'
                   : 'text-gray-600 hover:bg-gray-100'
                   }`}
@@ -634,83 +651,119 @@ const App = () => {
           </div>
 
           <div className="relative w-full md:w-72">
-            <Search className="w-4 h-4 text-gray-400 absolute left-3 top-2.5" />
+            <Search className="w-4 h-4 text-gray-400 absolute left-3 top-3" />
             <input
               type="text"
               placeholder="Search by ID, customer, UTR..."
               value={txSearch}
               onChange={(e) => setTxSearch(e.target.value)}
-              className="w-full pl-9 pr-4 py-1.5 border border-gray-300 rounded-lg text-xs focus:ring-2 focus:ring-blue-500 focus:outline-hidden"
+              className="w-full pl-9 pr-4 py-2 border border-gray-300 rounded-lg text-xs focus:ring-2 focus:ring-blue-500 focus:outline-hidden min-h-[38px]"
             />
           </div>
         </div>
 
         {/* Transaction Summary Cards */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
-          <div className="bg-white p-4 rounded-lg border border-gray-200">
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-2.5 sm:gap-4">
+          <div className="bg-white p-3 sm:p-4 rounded-xl border border-gray-200 shadow-xs">
             <div className="flex items-center">
-              <div className="p-2 bg-green-100 rounded-full mr-3">
-                <CheckCircle className="w-5 h-5 text-green-600" />
+              <div className="p-2 bg-green-100 rounded-lg mr-2.5 sm:mr-3 shrink-0">
+                <CheckCircle className="w-4 h-4 sm:w-5 sm:h-5 text-green-600" />
               </div>
-              <div>
-                <p className="text-sm text-gray-600">Successful</p>
-                <p className="text-xl font-semibold text-gray-900">{transactions.filter(t => t.status === 'success').length + 137}</p>
+              <div className="min-w-0">
+                <p className="text-[11px] sm:text-xs text-gray-500 truncate">Successful</p>
+                <p className="text-base sm:text-xl font-bold text-gray-900">{transactions.filter(t => t.status === 'success').length + 137}</p>
               </div>
             </div>
           </div>
-          <div className="bg-white p-4 rounded-lg border border-gray-200">
+          <div className="bg-white p-3 sm:p-4 rounded-xl border border-gray-200 shadow-xs">
             <div className="flex items-center">
-              <div className="p-2 bg-yellow-100 rounded-full mr-3">
-                <Clock className="w-5 h-5 text-yellow-600" />
+              <div className="p-2 bg-yellow-100 rounded-lg mr-2.5 sm:mr-3 shrink-0">
+                <Clock className="w-4 h-4 sm:w-5 sm:h-5 text-yellow-600" />
               </div>
-              <div>
-                <p className="text-sm text-gray-600">Pending</p>
-                <p className="text-xl font-semibold text-gray-900">12</p>
+              <div className="min-w-0">
+                <p className="text-[11px] sm:text-xs text-gray-500 truncate">Pending</p>
+                <p className="text-base sm:text-xl font-bold text-gray-900">12</p>
               </div>
             </div>
           </div>
-          <div className="bg-white p-4 rounded-lg border border-gray-200">
+          <div className="bg-white p-3 sm:p-4 rounded-xl border border-gray-200 shadow-xs">
             <div className="flex items-center">
-              <div className="p-2 bg-red-100 rounded-full mr-3">
-                <XCircle className="w-5 h-5 text-red-600" />
+              <div className="p-2 bg-red-100 rounded-lg mr-2.5 sm:mr-3 shrink-0">
+                <XCircle className="w-4 h-4 sm:w-5 sm:h-5 text-red-600" />
               </div>
-              <div>
-                <p className="text-sm text-gray-600">Failed</p>
-                <p className="text-xl font-semibold text-gray-900">5</p>
+              <div className="min-w-0">
+                <p className="text-[11px] sm:text-xs text-gray-500 truncate">Failed</p>
+                <p className="text-base sm:text-xl font-bold text-gray-900">5</p>
               </div>
             </div>
           </div>
-          <div className="bg-white p-4 rounded-lg border border-gray-200">
+          <div className="bg-white p-3 sm:p-4 rounded-xl border border-gray-200 shadow-xs">
             <div className="flex items-center">
-              <div className="p-2 bg-blue-100 rounded-full mr-3">
-                <DollarSign className="w-5 h-5 text-blue-600" />
+              <div className="p-2 bg-blue-100 rounded-lg mr-2.5 sm:mr-3 shrink-0">
+                <DollarSign className="w-4 h-4 sm:w-5 sm:h-5 text-blue-600" />
               </div>
-              <div>
-                <p className="text-sm text-gray-600">Total Volume</p>
-                <p className="text-xl font-semibold text-gray-900">₹{dashboardData.totalVolume.toLocaleString('en-IN')}</p>
+              <div className="min-w-0">
+                <p className="text-[11px] sm:text-xs text-gray-500 truncate">Total Volume</p>
+                <p className="text-sm sm:text-lg font-bold text-gray-900 truncate">₹{dashboardData.totalVolume.toLocaleString('en-IN')}</p>
               </div>
             </div>
           </div>
         </div>
 
-        {/* Transactions Table */}
-        <div className="bg-white rounded-xl shadow-sm border border-gray-200">
-          <div className="p-6 border-b border-gray-200 flex justify-between items-center">
-            <h3 className="text-lg font-semibold text-gray-900">Transaction History ({filteredTx.length})</h3>
+        {/* Transactions Container */}
+        <div className="bg-white rounded-xl shadow-xs border border-gray-200 overflow-hidden">
+          <div className="p-4 sm:p-6 border-b border-gray-200 flex justify-between items-center">
+            <h3 className="text-base sm:text-lg font-semibold text-gray-900">Transaction History ({filteredTx.length})</h3>
             <span className="text-xs text-gray-500">Auto-synced with services</span>
           </div>
-          <div className="overflow-x-auto">
-            <table className="w-full">
+
+          {/* Mobile Cards View */}
+          <div className="md:hidden divide-y divide-gray-100">
+            {filteredTx.map((tx) => (
+              <div key={tx.id} className="p-4 space-y-2.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-mono font-bold text-gray-900 bg-gray-100 px-2 py-0.5 rounded">{tx.id}</span>
+                  <span className={`inline-flex px-2 py-0.5 text-[11px] font-semibold rounded-full ${getStatusColor(tx.status)}`}>
+                    {tx.status}
+                  </span>
+                </div>
+                <div className="flex items-start justify-between">
+                  <div className="min-w-0 pr-2">
+                    <p className="text-sm font-semibold text-gray-900 truncate">{tx.service || 'POS Transaction'}</p>
+                    <p className="text-xs text-gray-500 truncate">{tx.customer || tx.beneficiary || 'Walk-in'}</p>
+                  </div>
+                  <div className="text-right shrink-0">
+                    <p className="text-base font-extrabold text-gray-900">₹{Number(tx.amount || 0).toLocaleString('en-IN')}</p>
+                    <span className="text-[11px] text-gray-400 font-mono block">{tx.terminalId || tx.utr || '—'}</span>
+                  </div>
+                </div>
+                <div className="flex items-center justify-between pt-2 border-t border-gray-100 text-xs text-gray-500">
+                  <span>{tx.date}</span>
+                  <button
+                    onClick={() => setActiveReceipt(tx)}
+                    className="inline-flex items-center gap-1 text-blue-600 hover:text-blue-800 font-semibold px-2.5 py-1.5 bg-blue-50 hover:bg-blue-100 rounded-lg min-h-[38px] transition-colors"
+                  >
+                    <Receipt className="w-3.5 h-3.5" />
+                    <span>View Receipt</span>
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {/* Desktop Table View */}
+          <div className="hidden md:block overflow-x-auto">
+            <table className="w-full min-w-[700px]">
               <thead className="bg-gray-50">
                 <tr>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Transaction ID</th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Date</th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Service</th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Customer / Recipient</th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Terminal / Ref</th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Amount</th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
-                  <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
+                  <th className="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Transaction ID</th>
+                  <th className="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Date</th>
+                  <th className="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Service</th>
+                  <th className="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Customer / Recipient</th>
+                  <th className="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Terminal / Ref</th>
+                  <th className="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Amount</th>
+                  <th className="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Status</th>
+                  <th className="px-6 py-3 text-right text-xs font-semibold text-gray-500 uppercase tracking-wider">Actions</th>
                 </tr>
               </thead>
               <tbody className="bg-white divide-y divide-gray-200">
@@ -719,20 +772,20 @@ const App = () => {
                     <td className="px-6 py-4 whitespace-nowrap text-xs font-mono font-semibold text-gray-900">{tx.id}</td>
                     <td className="px-6 py-4 whitespace-nowrap text-xs text-gray-500">{tx.date}</td>
                     <td className="px-6 py-4 whitespace-nowrap text-xs">
-                      <span className="font-medium text-gray-900">{tx.service || 'POS Transaction'}</span>
+                      <span className="font-semibold text-gray-900">{tx.service || 'POS Transaction'}</span>
                     </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{tx.customer || tx.beneficiary || 'Walk-in'}</td>
+                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 font-medium">{tx.customer || tx.beneficiary || 'Walk-in'}</td>
                     <td className="px-6 py-4 whitespace-nowrap text-xs font-mono text-gray-500">{tx.terminalId || tx.utr || '—'}</td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm font-bold text-gray-900">₹{Number(tx.amount || 0).toLocaleString('en-IN')}</td>
                     <td className="px-6 py-4 whitespace-nowrap">
-                      <span className={`inline-flex px-2 py-1 text-xs rounded-full ${getStatusColor(tx.status)}`}>
+                      <span className={`inline-flex px-2 py-1 text-xs rounded-full font-semibold ${getStatusColor(tx.status)}`}>
                         {tx.status}
                       </span>
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-right text-sm">
                       <button
                         onClick={() => setActiveReceipt(tx)}
-                        className="inline-flex items-center gap-1 text-blue-600 hover:text-blue-900 text-xs font-semibold"
+                        className="inline-flex items-center gap-1 text-blue-600 hover:text-blue-900 text-xs font-semibold px-2 py-1 hover:bg-blue-50 rounded"
                         title="View Receipt"
                       >
                         <Receipt className="w-3.5 h-3.5" />
@@ -750,85 +803,109 @@ const App = () => {
   };
 
   const renderSettlements = () => (
-    <div className="space-y-6">
-      <div className="flex justify-between items-center">
+    <div className="space-y-4 sm:space-y-6">
+      <div className="flex flex-col sm:flex-row justify-between sm:items-center gap-3 sm:gap-4">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">Settlements</h1>
+          <h1 className="text-xl sm:text-2xl font-bold text-gray-900">Settlements</h1>
           <p className="text-xs text-gray-500 mt-0.5">Platform merchant batch settlements to verified bank accounts</p>
         </div>
-        <button className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-xs font-semibold">
+        <button className="px-4 py-2.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-xs font-semibold min-h-[44px] sm:min-h-0 self-stretch sm:self-auto flex items-center justify-center">
           Request Settlement
         </button>
       </div>
 
       {/* Settlement Summary Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-        <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200">
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 sm:gap-6">
+        <div className="bg-white p-4 sm:p-6 rounded-xl shadow-xs border border-gray-200">
           <div className="flex items-center justify-between">
             <div>
-              <p className="text-sm font-medium text-gray-600">Completed Settlements</p>
-              <p className="text-2xl font-bold text-gray-900">{dashboardData.completedSettlements}</p>
+              <p className="text-xs sm:text-sm font-medium text-gray-600">Completed Settlements</p>
+              <p className="text-xl sm:text-2xl font-bold text-gray-900 mt-1">{dashboardData.completedSettlements}</p>
             </div>
-            <div className="p-3 bg-green-100 rounded-full">
+            <div className="p-3 bg-green-100 rounded-xl">
               <CheckCircle className="w-6 h-6 text-green-600" />
             </div>
           </div>
         </div>
 
-        <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200">
+        <div className="bg-white p-4 sm:p-6 rounded-xl shadow-xs border border-gray-200">
           <div className="flex items-center justify-between">
             <div>
-              <p className="text-sm font-medium text-gray-600">Pending Settlements</p>
-              <p className="text-2xl font-bold text-gray-900">8</p>
+              <p className="text-xs sm:text-sm font-medium text-gray-600">Pending Settlements</p>
+              <p className="text-xl sm:text-2xl font-bold text-gray-900 mt-1">8</p>
             </div>
-            <div className="p-3 bg-yellow-100 rounded-full">
+            <div className="p-3 bg-yellow-100 rounded-xl">
               <Clock className="w-6 h-6 text-yellow-600" />
             </div>
           </div>
         </div>
 
-        <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200">
+        <div className="bg-white p-4 sm:p-6 rounded-xl shadow-xs border border-gray-200 sm:col-span-3 lg:col-span-1">
           <div className="flex items-center justify-between">
             <div>
-              <p className="text-sm font-medium text-gray-600">This Month</p>
-              <p className="text-2xl font-bold text-gray-900">₹245,678</p>
+              <p className="text-xs sm:text-sm font-medium text-gray-600">This Month</p>
+              <p className="text-xl sm:text-2xl font-bold text-gray-900 mt-1">₹245,678</p>
             </div>
-            <div className="p-3 bg-blue-100 rounded-full">
+            <div className="p-3 bg-blue-100 rounded-xl">
               <DollarSign className="w-6 h-6 text-blue-600" />
             </div>
           </div>
         </div>
       </div>
 
-      {/* Settlements Table */}
-      <div className="bg-white rounded-xl shadow-sm border border-gray-200">
-        <div className="p-6 border-b border-gray-200">
-          <h3 className="text-lg font-semibold text-gray-900">Settlement History</h3>
+      {/* Settlements Container */}
+      <div className="bg-white rounded-xl shadow-xs border border-gray-200 overflow-hidden">
+        <div className="p-4 sm:p-6 border-b border-gray-200">
+          <h3 className="text-base sm:text-lg font-semibold text-gray-900">Settlement History</h3>
         </div>
-        <div className="overflow-x-auto">
-          <table className="w-full">
+
+        {/* Mobile Cards View */}
+        <div className="md:hidden divide-y divide-gray-100">
+          {settlements.map((settlement) => (
+            <div key={settlement.id} className="p-4 space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-mono font-bold text-gray-900 bg-gray-100 px-2 py-0.5 rounded">{settlement.id}</span>
+                <span className={`inline-flex px-2 py-0.5 text-[11px] font-semibold rounded-full ${getStatusColor(settlement.status)}`}>
+                  {settlement.status}
+                </span>
+              </div>
+              <div className="flex items-center justify-between text-sm">
+                <span className="text-gray-600">Bank: <strong className="text-gray-900">{settlement.bank}</strong></span>
+                <span className="text-base font-bold text-gray-900">₹{settlement.amount.toLocaleString('en-IN')}</span>
+              </div>
+              <div className="flex items-center justify-between text-xs text-gray-500 pt-1">
+                <span>{settlement.date} • Fee: ₹{settlement.fee}</span>
+                <span className="font-mono text-gray-400">UTR: {settlement.utr}</span>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {/* Desktop Table View */}
+        <div className="hidden md:block overflow-x-auto">
+          <table className="w-full min-w-[650px]">
             <thead className="bg-gray-50">
               <tr>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Settlement ID</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Date</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Amount</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Fee</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Bank</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">UTR</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
+                <th className="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Settlement ID</th>
+                <th className="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Date</th>
+                <th className="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Amount</th>
+                <th className="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Fee</th>
+                <th className="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Bank</th>
+                <th className="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">UTR</th>
+                <th className="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Status</th>
               </tr>
             </thead>
             <tbody className="bg-white divide-y divide-gray-200">
               {settlements.map((settlement) => (
                 <tr key={settlement.id} className="hover:bg-gray-50">
-                  <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">{settlement.id}</td>
+                  <td className="px-6 py-4 whitespace-nowrap text-sm font-mono font-medium text-gray-900">{settlement.id}</td>
                   <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{settlement.date}</td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">₹{settlement.amount}</td>
+                  <td className="px-6 py-4 whitespace-nowrap text-sm font-bold text-gray-900">₹{settlement.amount.toLocaleString('en-IN')}</td>
                   <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">₹{settlement.fee}</td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{settlement.bank}</td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{settlement.utr}</td>
+                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 font-medium">{settlement.bank}</td>
+                  <td className="px-6 py-4 whitespace-nowrap text-sm font-mono text-gray-500">{settlement.utr}</td>
                   <td className="px-6 py-4 whitespace-nowrap">
-                    <span className={`inline-flex px-2 py-1 text-xs rounded-full ${getStatusColor(settlement.status)}`}>
+                    <span className={`inline-flex px-2 py-1 text-xs rounded-full font-semibold ${getStatusColor(settlement.status)}`}>
                       {settlement.status}
                     </span>
                   </td>
@@ -842,24 +919,24 @@ const App = () => {
   );
 
   const renderPOSManagement = () => (
-    <div className="space-y-6">
-      <div className="flex justify-between items-center">
+    <div className="space-y-4 sm:space-y-6">
+      <div className="flex flex-col sm:flex-row justify-between sm:items-center gap-3 sm:gap-4">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">POS Management</h1>
+          <h1 className="text-xl sm:text-2xl font-bold text-gray-900">POS Management</h1>
           <p className="text-xs text-gray-500 mt-0.5">Hardware terminal inventory, connectivity, and assisted services</p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-col sm:flex-row gap-2 w-full sm:w-auto">
           <button
             onClick={() => {
               setActiveModule('banking');
               setBankingInitialAction('pos');
             }}
-            className="flex items-center px-4 py-2 bg-gradient-to-r from-blue-600 to-indigo-600 text-white rounded-lg hover:from-blue-700 hover:to-indigo-700 text-xs font-semibold shadow-xs"
+            className="flex items-center justify-center px-4 py-2.5 bg-gradient-to-r from-blue-600 to-indigo-600 text-white rounded-lg hover:from-blue-700 hover:to-indigo-700 text-xs font-semibold shadow-xs min-h-[44px] sm:min-h-0"
           >
             <CreditCard className="w-3.5 h-3.5 mr-1.5" />
             Launch POS Demo
           </button>
-          <button className="flex items-center px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 text-xs font-semibold">
+          <button className="flex items-center justify-center px-4 py-2.5 border border-gray-300 rounded-lg hover:bg-gray-50 text-xs font-semibold min-h-[44px] sm:min-h-0">
             <Plus className="w-3.5 h-3.5 mr-1.5" />
             Add Device
           </button>
@@ -867,87 +944,130 @@ const App = () => {
       </div>
 
       {/* POS Summary Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-        <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200">
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 sm:gap-6">
+        <div className="bg-white p-4 sm:p-6 rounded-xl shadow-xs border border-gray-200">
           <div className="flex items-center justify-between">
             <div>
-              <p className="text-sm font-medium text-gray-600">Total Devices</p>
-              <p className="text-2xl font-bold text-gray-900">{posDevices.length}</p>
+              <p className="text-xs sm:text-sm font-medium text-gray-600">Total Devices</p>
+              <p className="text-xl sm:text-2xl font-bold text-gray-900 mt-1">{posDevices.length}</p>
             </div>
-            <div className="p-3 bg-blue-100 rounded-full">
+            <div className="p-3 bg-blue-100 rounded-xl">
               <Monitor className="w-6 h-6 text-blue-600" />
             </div>
           </div>
         </div>
 
-        <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200">
+        <div className="bg-white p-4 sm:p-6 rounded-xl shadow-xs border border-gray-200">
           <div className="flex items-center justify-between">
             <div>
-              <p className="text-sm font-medium text-gray-600">Online Devices</p>
-              <p className="text-2xl font-bold text-gray-900">{dashboardData.activeDevices}</p>
+              <p className="text-xs sm:text-sm font-medium text-gray-600">Online Devices</p>
+              <p className="text-xl sm:text-2xl font-bold text-gray-900 mt-1">{dashboardData.activeDevices}</p>
             </div>
-            <div className="p-3 bg-green-100 rounded-full">
+            <div className="p-3 bg-green-100 rounded-xl">
               <Zap className="w-6 h-6 text-green-600" />
             </div>
           </div>
         </div>
 
-        <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200">
+        <div className="bg-white p-4 sm:p-6 rounded-xl shadow-xs border border-gray-200 sm:col-span-3 lg:col-span-1">
           <div className="flex items-center justify-between">
             <div>
-              <p className="text-sm font-medium text-gray-600">Offline Devices</p>
-              <p className="text-2xl font-bold text-gray-900">{dashboardData.offlineDevices}</p>
+              <p className="text-xs sm:text-sm font-medium text-gray-600">Offline Devices</p>
+              <p className="text-xl sm:text-2xl font-bold text-gray-900 mt-1">{dashboardData.offlineDevices}</p>
             </div>
-            <div className="p-3 bg-red-100 rounded-full">
+            <div className="p-3 bg-red-100 rounded-xl">
               <AlertTriangle className="w-6 h-6 text-red-600" />
             </div>
           </div>
         </div>
       </div>
 
-      {/* POS Devices Table */}
-      <div className="bg-white rounded-xl shadow-sm border border-gray-200">
-        <div className="p-6 border-b border-gray-200">
-          <h3 className="text-lg font-semibold text-gray-900">POS Devices</h3>
+      {/* POS Devices Container */}
+      <div className="bg-white rounded-xl shadow-xs border border-gray-200 overflow-hidden">
+        <div className="p-4 sm:p-6 border-b border-gray-200">
+          <h3 className="text-base sm:text-lg font-semibold text-gray-900">POS Devices</h3>
         </div>
-        <div className="overflow-x-auto">
-          <table className="w-full">
+
+        {/* Mobile Cards View */}
+        <div className="md:hidden divide-y divide-gray-100">
+          {posDevices.map((device) => (
+            <div key={device.id} className="p-4 space-y-2.5">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-mono font-bold text-gray-900 bg-gray-100 px-2 py-0.5 rounded">{device.id}</span>
+                <span className={`inline-flex px-2 py-0.5 text-[11px] font-semibold rounded-full ${getStatusColor(device.status)}`}>
+                  {device.status}
+                </span>
+              </div>
+              <div className="flex items-center justify-between">
+                <div className="min-w-0 pr-2">
+                  <p className="text-sm font-semibold text-gray-900 truncate">{device.merchant}</p>
+                  <p className="text-xs text-gray-500">Last active: {device.lastActive}</p>
+                </div>
+                <div className="text-right shrink-0">
+                  <span className="text-[11px] text-gray-500 block">Transactions</span>
+                  <p className="text-sm font-bold text-gray-900">{device.transactions}</p>
+                </div>
+              </div>
+              <div className="flex items-center justify-end gap-2 pt-2 border-t border-gray-100">
+                <button
+                  onClick={() => {
+                    setActiveModule('banking');
+                    setBankingInitialAction('pos');
+                  }}
+                  className="px-3 py-1.5 bg-blue-50 text-blue-700 hover:bg-blue-100 rounded-lg text-xs font-semibold min-h-[38px]"
+                >
+                  Run Demo
+                </button>
+                <button className="p-2 text-blue-600 hover:text-blue-900 rounded-lg min-w-[38px] min-h-[38px] flex items-center justify-center">
+                  <Edit className="w-4 h-4" />
+                </button>
+                <button className="p-2 text-red-600 hover:text-red-900 rounded-lg min-w-[38px] min-h-[38px] flex items-center justify-center">
+                  <Trash2 className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {/* Desktop Table View */}
+        <div className="hidden md:block overflow-x-auto">
+          <table className="w-full min-w-[650px]">
             <thead className="bg-gray-50">
               <tr>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Device ID</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Assigned Merchant</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Last Active</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Transactions</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
+                <th className="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Device ID</th>
+                <th className="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Assigned Merchant</th>
+                <th className="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Status</th>
+                <th className="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Last Active</th>
+                <th className="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Transactions</th>
+                <th className="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Actions</th>
               </tr>
             </thead>
             <tbody className="bg-white divide-y divide-gray-200">
               {posDevices.map((device) => (
                 <tr key={device.id} className="hover:bg-gray-50">
-                  <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">{device.id}</td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{device.merchant}</td>
+                  <td className="px-6 py-4 whitespace-nowrap text-sm font-mono font-medium text-gray-900">{device.id}</td>
+                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 font-medium">{device.merchant}</td>
                   <td className="px-6 py-4 whitespace-nowrap">
-                    <span className={`inline-flex px-2 py-1 text-xs rounded-full ${getStatusColor(device.status)}`}>
+                    <span className={`inline-flex px-2 py-1 text-xs rounded-full font-semibold ${getStatusColor(device.status)}`}>
                       {device.status}
                     </span>
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{device.lastActive}</td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm font-semibold text-gray-900">{device.transactions}</td>
+                  <td className="px-6 py-4 whitespace-nowrap text-sm font-bold text-gray-900">{device.transactions}</td>
                   <td className="px-6 py-4 whitespace-nowrap text-sm space-x-2">
                     <button
                       onClick={() => {
                         setActiveModule('banking');
                         setBankingInitialAction('pos');
                       }}
-                      className="px-2.5 py-1 bg-blue-50 text-blue-700 hover:bg-blue-100 rounded text-xs font-medium"
+                      className="px-2.5 py-1 bg-blue-50 text-blue-700 hover:bg-blue-100 rounded text-xs font-semibold"
                     >
                       Run Demo
                     </button>
-                    <button className="text-blue-600 hover:text-blue-900">
+                    <button className="text-blue-600 hover:text-blue-900 p-1">
                       <Edit className="w-4 h-4" />
                     </button>
-                    <button className="text-red-600 hover:text-red-900">
+                    <button className="text-red-600 hover:text-red-900 p-1">
                       <Trash2 className="w-4 h-4" />
                     </button>
                   </td>
@@ -961,45 +1081,74 @@ const App = () => {
   );
 
   const renderMerchants = () => (
-    <div className="space-y-6">
-      <div className="flex justify-between items-center">
+    <div className="space-y-4 sm:space-y-6">
+      <div className="flex flex-col sm:flex-row justify-between sm:items-center gap-3 sm:gap-4">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">Merchants</h1>
+          <h1 className="text-xl sm:text-2xl font-bold text-gray-900">Merchants</h1>
           <p className="text-xs text-gray-500 mt-0.5">Admin onboarding and merchant enterprise monitoring</p>
         </div>
-        <button className="flex items-center px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-xs font-semibold">
+        <button className="flex items-center justify-center px-4 py-2.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-xs font-semibold min-h-[44px] sm:min-h-0 self-stretch sm:self-auto">
           <Plus className="w-4 h-4 mr-2" />
           Add Merchant
         </button>
       </div>
 
-      {/* Merchants Table */}
-      <div className="bg-white rounded-xl shadow-sm border border-gray-200">
-        <div className="p-6 border-b border-gray-200">
-          <h3 className="text-lg font-semibold text-gray-900">Merchant List</h3>
+      {/* Merchants Container */}
+      <div className="bg-white rounded-xl shadow-xs border border-gray-200 overflow-hidden">
+        <div className="p-4 sm:p-6 border-b border-gray-200">
+          <h3 className="text-base sm:text-lg font-semibold text-gray-900">Merchant List</h3>
         </div>
-        <div className="overflow-x-auto">
-          <table className="w-full">
+
+        {/* Mobile Cards View */}
+        <div className="md:hidden divide-y divide-gray-100">
+          {merchants.map((merchant) => (
+            <div key={merchant.id} className="p-4 space-y-2">
+              <div className="flex items-center justify-between">
+                <div>
+                  <span className="text-xs font-mono font-bold text-gray-900 bg-gray-100 px-2 py-0.5 rounded">{merchant.id}</span>
+                  <span className="ml-2 text-xs text-gray-500 font-medium">({merchant.businessType})</span>
+                </div>
+                <span className="text-base font-bold text-gray-900">₹{merchant.balance.toLocaleString('en-IN')}</span>
+              </div>
+              <p className="text-sm font-semibold text-gray-900">{merchant.name}</p>
+              <div className="flex items-center justify-between text-xs text-gray-500 pt-1">
+                <span>{merchant.devices} Devices • {merchant.transactions} Txns</span>
+                <div className="flex items-center gap-2">
+                  <button className="p-1.5 text-blue-600 hover:text-blue-900 min-w-[36px] min-h-[36px] flex items-center justify-center">
+                    <Eye className="w-4 h-4" />
+                  </button>
+                  <button className="p-1.5 text-green-600 hover:text-green-900 min-w-[36px] min-h-[36px] flex items-center justify-center">
+                    <Edit className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {/* Desktop Table View */}
+        <div className="hidden md:block overflow-x-auto">
+          <table className="w-full min-w-[650px]">
             <thead className="bg-gray-50">
               <tr>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Merchant ID</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Name</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Business Type</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Balance</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Devices</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Transactions</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
+                <th className="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Merchant ID</th>
+                <th className="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Name</th>
+                <th className="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Business Type</th>
+                <th className="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Balance</th>
+                <th className="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Devices</th>
+                <th className="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Transactions</th>
+                <th className="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Actions</th>
               </tr>
             </thead>
             <tbody className="bg-white divide-y divide-gray-200">
               {merchants.map((merchant) => (
                 <tr key={merchant.id} className="hover:bg-gray-50">
-                  <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">{merchant.id}</td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">{merchant.name}</td>
+                  <td className="px-6 py-4 whitespace-nowrap text-sm font-mono font-medium text-gray-900">{merchant.id}</td>
+                  <td className="px-6 py-4 whitespace-nowrap text-sm font-semibold text-gray-900">{merchant.name}</td>
                   <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{merchant.businessType}</td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">₹{merchant.balance}</td>
+                  <td className="px-6 py-4 whitespace-nowrap text-sm font-bold text-gray-900">₹{merchant.balance.toLocaleString('en-IN')}</td>
                   <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{merchant.devices}</td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{merchant.transactions}</td>
+                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 font-medium">{merchant.transactions}</td>
                   <td className="px-6 py-4 whitespace-nowrap text-sm">
                     <button className="text-blue-600 hover:text-blue-900 mr-3">
                       <Eye className="w-4 h-4" />
@@ -1018,18 +1167,18 @@ const App = () => {
   );
 
   const renderReports = () => (
-    <div className="space-y-6">
-      <div className="flex justify-between items-center">
+    <div className="space-y-4 sm:space-y-6">
+      <div className="flex flex-col sm:flex-row justify-between sm:items-center gap-3 sm:gap-4">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">Reports & Analytics</h1>
+          <h1 className="text-xl sm:text-2xl font-bold text-gray-900">Reports & Analytics</h1>
           <p className="text-xs text-gray-500 mt-0.5">Comprehensive audit reports for BBPS, POS, DMT, and Settlements</p>
         </div>
-        <div className="flex space-x-2">
-          <button className="flex items-center px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 text-xs font-semibold">
+        <div className="flex items-center space-x-2">
+          <button className="flex items-center px-3.5 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 text-xs font-semibold min-h-[40px]">
             <Search className="w-3.5 h-3.5 mr-1.5" />
             Filter
           </button>
-          <button className="flex items-center px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-xs font-semibold">
+          <button className="flex items-center px-3.5 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-xs font-semibold min-h-[40px]">
             <Download className="w-3.5 h-3.5 mr-1.5" />
             Export PDF
           </button>
@@ -1037,102 +1186,93 @@ const App = () => {
       </div>
 
       {/* Report Cards Grid */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-        {/* NEW BBPS Reports */}
-        <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200 hover:shadow-md transition-shadow cursor-pointer group">
-          <div className="flex items-center justify-between mb-4">
-            <h3 className="text-lg font-semibold text-gray-900 group-hover:text-blue-600 transition-colors">BBPS Reports</h3>
-            <Zap className="w-8 h-8 text-amber-500" />
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-6">
+        <div className="bg-white p-4 sm:p-6 rounded-xl shadow-xs border border-gray-200 hover:shadow-md transition-shadow cursor-pointer group">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-base sm:text-lg font-semibold text-gray-900 group-hover:text-blue-600 transition-colors">BBPS Reports</h3>
+            <Zap className="w-7 h-7 sm:w-8 sm:h-8 text-amber-500 shrink-0" />
           </div>
-          <p className="text-gray-600 text-sm mb-4">Electricity, gas, water, FASTag and utility bill reconciliation</p>
+          <p className="text-gray-600 text-xs sm:text-sm mb-4">Electricity, gas, water, FASTag and utility bill reconciliation</p>
           <button className="text-blue-600 hover:text-blue-800 font-semibold text-xs flex items-center gap-1">
             <span>Generate BBPS Report</span> →
           </button>
         </div>
 
-        {/* NEW POS Assisted Reports */}
-        <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200 hover:shadow-md transition-shadow cursor-pointer group">
-          <div className="flex items-center justify-between mb-4">
-            <h3 className="text-lg font-semibold text-gray-900 group-hover:text-blue-600 transition-colors">POS Assisted Reports</h3>
-            <CreditCard className="w-8 h-8 text-blue-600" />
+        <div className="bg-white p-4 sm:p-6 rounded-xl shadow-xs border border-gray-200 hover:shadow-md transition-shadow cursor-pointer group">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-base sm:text-lg font-semibold text-gray-900 group-hover:text-blue-600 transition-colors">POS Assisted Reports</h3>
+            <CreditCard className="w-7 h-7 sm:w-8 sm:h-8 text-blue-600 shrink-0" />
           </div>
-          <p className="text-gray-600 text-sm mb-4">Terminal-wise card volume, merchant wallet credits, and batch cuts</p>
+          <p className="text-gray-600 text-xs sm:text-sm mb-4">Terminal-wise card volume, merchant wallet credits, and batch cuts</p>
           <button className="text-blue-600 hover:text-blue-800 font-semibold text-xs flex items-center gap-1">
             <span>Generate POS Report</span> →
           </button>
         </div>
 
-        {/* NEW DMT Reports */}
-        <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200 hover:shadow-md transition-shadow cursor-pointer group">
-          <div className="flex items-center justify-between mb-4">
-            <h3 className="text-lg font-semibold text-gray-900 group-hover:text-blue-600 transition-colors">Money Transfer (DMT)</h3>
-            <Send className="w-8 h-8 text-indigo-600" />
+        <div className="bg-white p-4 sm:p-6 rounded-xl shadow-xs border border-gray-200 hover:shadow-md transition-shadow cursor-pointer group">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-base sm:text-lg font-semibold text-gray-900 group-hover:text-blue-600 transition-colors">Money Transfer (DMT)</h3>
+            <Send className="w-7 h-7 sm:w-8 sm:h-8 text-indigo-600 shrink-0" />
           </div>
-          <p className="text-gray-600 text-sm mb-4">Domestic IMPS and NEFT beneficiary payout audit logs and UTRs</p>
+          <p className="text-gray-600 text-xs sm:text-sm mb-4">Domestic IMPS and NEFT beneficiary payout audit logs and UTRs</p>
           <button className="text-blue-600 hover:text-blue-800 font-semibold text-xs flex items-center gap-1">
             <span>Generate DMT Report</span> →
           </button>
         </div>
 
-        {/* NEW Recharge Reports */}
-        <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200 hover:shadow-md transition-shadow cursor-pointer group">
-          <div className="flex items-center justify-between mb-4">
-            <h3 className="text-lg font-semibold text-gray-900 group-hover:text-blue-600 transition-colors">Recharge Reports</h3>
-            <Smartphone className="w-8 h-8 text-emerald-600" />
+        <div className="bg-white p-4 sm:p-6 rounded-xl shadow-xs border border-gray-200 hover:shadow-md transition-shadow cursor-pointer group">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-base sm:text-lg font-semibold text-gray-900 group-hover:text-blue-600 transition-colors">Recharge Reports</h3>
+            <Smartphone className="w-7 h-7 sm:w-8 sm:h-8 text-emerald-600 shrink-0" />
           </div>
-          <p className="text-gray-600 text-sm mb-4">Operator-wise Prepaid Mobile & DTH recharge commission logs</p>
+          <p className="text-gray-600 text-xs sm:text-sm mb-4">Operator-wise Prepaid Mobile & DTH recharge commission logs</p>
           <button className="text-blue-600 hover:text-blue-800 font-semibold text-xs flex items-center gap-1">
             <span>Generate Recharge Report</span> →
           </button>
         </div>
 
-        {/* Existing Transaction Reports */}
-        <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200 hover:shadow-md transition-shadow cursor-pointer">
-          <div className="flex items-center justify-between mb-4">
-            <h3 className="text-lg font-semibold text-gray-900">Transaction Reports</h3>
-            <FileText className="w-8 h-8 text-blue-600" />
+        <div className="bg-white p-4 sm:p-6 rounded-xl shadow-xs border border-gray-200 hover:shadow-md transition-shadow cursor-pointer">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-base sm:text-lg font-semibold text-gray-900">Transaction Reports</h3>
+            <FileText className="w-7 h-7 sm:w-8 sm:h-8 text-blue-600 shrink-0" />
           </div>
-          <p className="text-gray-600 text-sm mb-4">View detailed transaction analytics and trends</p>
+          <p className="text-gray-600 text-xs sm:text-sm mb-4">View detailed transaction analytics and trends</p>
           <button className="text-blue-600 hover:text-blue-800 font-semibold text-xs">Generate Report →</button>
         </div>
 
-        {/* Existing Settlement Reports */}
-        <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200 hover:shadow-md transition-shadow cursor-pointer">
-          <div className="flex items-center justify-between mb-4">
-            <h3 className="text-lg font-semibold text-gray-900">Settlement Reports</h3>
-            <DollarSign className="w-8 h-8 text-green-600" />
+        <div className="bg-white p-4 sm:p-6 rounded-xl shadow-xs border border-gray-200 hover:shadow-md transition-shadow cursor-pointer">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-base sm:text-lg font-semibold text-gray-900">Settlement Reports</h3>
+            <DollarSign className="w-7 h-7 sm:w-8 sm:h-8 text-green-600 shrink-0" />
           </div>
-          <p className="text-gray-600 text-sm mb-4">Analyze settlement patterns and fees</p>
+          <p className="text-gray-600 text-xs sm:text-sm mb-4">Analyze settlement patterns and fees</p>
           <button className="text-blue-600 hover:text-blue-800 font-semibold text-xs">Generate Report →</button>
         </div>
 
-        {/* Existing Wallet Reports */}
-        <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200 hover:shadow-md transition-shadow cursor-pointer">
-          <div className="flex items-center justify-between mb-4">
-            <h3 className="text-lg font-semibold text-gray-900">Wallet Reports</h3>
-            <Wallet className="w-8 h-8 text-purple-600" />
+        <div className="bg-white p-4 sm:p-6 rounded-xl shadow-xs border border-gray-200 hover:shadow-md transition-shadow cursor-pointer">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-base sm:text-lg font-semibold text-gray-900">Wallet Reports</h3>
+            <Wallet className="w-7 h-7 sm:w-8 sm:h-8 text-purple-600 shrink-0" />
           </div>
-          <p className="text-gray-600 text-sm mb-4">Track wallet balances and transactions</p>
+          <p className="text-gray-600 text-xs sm:text-sm mb-4">Track wallet balances and transactions</p>
           <button className="text-blue-600 hover:text-blue-800 font-semibold text-xs">Generate Report →</button>
         </div>
 
-        {/* Existing POS Performance */}
-        <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200 hover:shadow-md transition-shadow cursor-pointer">
-          <div className="flex items-center justify-between mb-4">
-            <h3 className="text-lg font-semibold text-gray-900">POS Performance</h3>
-            <Monitor className="w-8 h-8 text-indigo-600" />
+        <div className="bg-white p-4 sm:p-6 rounded-xl shadow-xs border border-gray-200 hover:shadow-md transition-shadow cursor-pointer">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-base sm:text-lg font-semibold text-gray-900">POS Performance</h3>
+            <Monitor className="w-7 h-7 sm:w-8 sm:h-8 text-indigo-600 shrink-0" />
           </div>
-          <p className="text-gray-600 text-sm mb-4">Monitor POS device usage and efficiency</p>
+          <p className="text-gray-600 text-xs sm:text-sm mb-4">Monitor POS device usage and efficiency</p>
           <button className="text-blue-600 hover:text-blue-800 font-semibold text-xs">Generate Report →</button>
         </div>
 
-        {/* Existing Merchant Analytics */}
-        <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200 hover:shadow-md transition-shadow cursor-pointer">
-          <div className="flex items-center justify-between mb-4">
-            <h3 className="text-lg font-semibold text-gray-900">Merchant Analytics</h3>
-            <Building className="w-8 h-8 text-orange-600" />
+        <div className="bg-white p-4 sm:p-6 rounded-xl shadow-xs border border-gray-200 hover:shadow-md transition-shadow cursor-pointer">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-base sm:text-lg font-semibold text-gray-900">Merchant Analytics</h3>
+            <Building className="w-7 h-7 sm:w-8 sm:h-8 text-orange-600 shrink-0" />
           </div>
-          <p className="text-gray-600 text-sm mb-4">Analyze merchant performance metrics</p>
+          <p className="text-gray-600 text-xs sm:text-sm mb-4">Analyze merchant performance metrics</p>
           <button className="text-blue-600 hover:text-blue-800 font-semibold text-xs">Generate Report →</button>
         </div>
       </div>
@@ -1182,9 +1322,91 @@ const App = () => {
   ];
 
   return (
-    <div className="flex h-screen bg-gray-50">
-      {/* Sidebar */}
-      <div className={`${sidebarOpen ? 'w-64' : 'w-20'} bg-white shadow-lg transition-all duration-300 flex flex-col shrink-0`}>
+    <div className="flex h-screen bg-gray-50 overflow-hidden">
+      {/* Mobile Drawer Backdrop */}
+      {mobileMenuOpen && (
+        <div
+          onClick={() => setMobileMenuOpen(false)}
+          className="fixed inset-0 bg-black/50 backdrop-blur-xs z-40 md:hidden transition-opacity"
+          aria-hidden="true"
+        />
+      )}
+
+      {/* Mobile Drawer (Overlay for < md screens) */}
+      <aside
+        className={`fixed inset-y-0 left-0 z-50 w-72 max-w-[85vw] bg-white shadow-2xl flex flex-col transform transition-transform duration-300 ease-in-out md:hidden ${
+          mobileMenuOpen ? 'translate-x-0' : '-translate-x-full'
+        }`}
+      >
+        {/* Drawer Header */}
+        <div className="flex items-center justify-between p-4 border-b border-gray-200">
+          <div className="flex items-center gap-2.5">
+            <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center text-white shadow-xs">
+              <CreditCard className="w-5 h-5" />
+            </div>
+            <div>
+              <span className="text-base font-bold text-gray-900 block leading-tight">PayPro</span>
+              <span className="text-[11px] text-gray-500 font-medium">ReachPay Prototype</span>
+            </div>
+          </div>
+          <button
+            onClick={() => setMobileMenuOpen(false)}
+            className="p-2 rounded-lg text-gray-500 hover:text-gray-700 hover:bg-gray-100 min-w-[40px] min-h-[40px] flex items-center justify-center"
+            aria-label="Close Navigation"
+          >
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        {/* Drawer Navigation Links */}
+        <nav className="flex-1 px-3 py-4 overflow-y-auto space-y-1">
+          {modules.map((module) => {
+            const Icon = module.icon;
+            const isActive = activeModule === module.id;
+            return (
+              <button
+                key={module.id}
+                onClick={() => handleNavigate(module.id)}
+                className={`w-full flex items-center px-3.5 py-3 text-left rounded-xl transition-colors text-sm font-medium min-h-[44px] ${
+                  isActive
+                    ? 'bg-blue-50 text-blue-700 font-bold border-r-4 border-blue-600'
+                    : 'text-gray-700 hover:bg-gray-100'
+                }`}
+              >
+                <Icon className={`w-5 h-5 mr-3 shrink-0 ${isActive ? 'text-blue-600' : 'text-gray-500'}`} />
+                <span className="truncate">{module.label}</span>
+              </button>
+            );
+          })}
+        </nav>
+
+        {/* Drawer User Profile */}
+        <div className="p-4 border-t border-gray-200 bg-gray-50/70">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2.5 min-w-0">
+              <div className="w-9 h-9 bg-blue-600 rounded-full flex items-center justify-center text-white font-bold shrink-0">
+                <Users className="w-4 h-4" />
+              </div>
+              <div className="min-w-0 truncate">
+                <p className="text-xs font-semibold text-gray-900 truncate">John Doe</p>
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[11px] text-gray-500 capitalize">{userRole}</span>
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
+                </div>
+              </div>
+            </div>
+            <button
+              onClick={() => setUserRole(userRole === 'admin' ? 'merchant' : 'admin')}
+              className="text-[11px] font-semibold text-blue-600 hover:text-blue-800 bg-blue-50 px-2.5 py-1.5 rounded-md shrink-0 min-h-[36px]"
+            >
+              Role
+            </button>
+          </div>
+        </div>
+      </aside>
+
+      {/* Desktop Sidebar (Permanent column for >= md screens) */}
+      <aside className={`hidden md:flex flex-col shrink-0 ${sidebarOpen ? 'w-64' : 'w-20'} bg-white shadow-lg transition-all duration-300`}>
         {/* Logo */}
         <div className="flex items-center p-6 border-b border-gray-200">
           <div className="flex items-center">
@@ -1195,7 +1417,7 @@ const App = () => {
           </div>
         </div>
 
-        {/* Navigation */}
+        {/* Desktop Navigation */}
         <nav className="flex-1 px-4 py-6 overflow-y-auto">
           <ul className="space-y-1.5">
             {modules.map((module) => {
@@ -1222,7 +1444,7 @@ const App = () => {
           </ul>
         </nav>
 
-        {/* User Profile */}
+        {/* Desktop User Profile */}
         <div className="p-4 border-t border-gray-200 bg-gray-50/50">
           <div className="flex items-center">
             <div className="w-10 h-10 bg-blue-600 rounded-full flex items-center justify-center text-white font-bold shrink-0">
@@ -1239,37 +1461,54 @@ const App = () => {
             )}
           </div>
         </div>
-      </div>
+      </aside>
 
       {/* Main Content Area */}
       <div className="flex-1 flex flex-col overflow-hidden min-w-0">
         {/* Header */}
         <header className="bg-white shadow-xs border-b border-gray-200 shrink-0">
-          <div className="flex items-center justify-between px-6 py-4">
-            <div className="flex items-center flex-1 max-w-lg">
+          <div className="flex items-center justify-between px-3 sm:px-6 py-2.5 sm:py-3.5">
+            <div className="flex items-center flex-1 max-w-lg min-w-0">
               <button
-                onClick={() => setSidebarOpen(!sidebarOpen)}
-                className="p-2 rounded-lg hover:bg-gray-100 text-gray-600"
-                title="Toggle Sidebar"
+                onClick={() => {
+                  if (typeof window !== 'undefined' && window.innerWidth < 768) {
+                    setMobileMenuOpen(prev => !prev);
+                  } else {
+                    setSidebarOpen(prev => !prev);
+                  }
+                }}
+                className="p-2 rounded-lg hover:bg-gray-100 text-gray-600 min-w-[42px] min-h-[42px] flex items-center justify-center shrink-0"
+                title="Toggle Navigation Menu"
+                aria-label="Toggle Navigation Menu"
               >
                 <Menu className="w-5 h-5" />
               </button>
-              <div className="ml-4 relative flex-1 max-w-md">
+
+              {/* Mobile PayPro Brand on small screens */}
+              <div className="flex items-center gap-1.5 ml-2 md:hidden shrink-0">
+                <div className="w-6 h-6 bg-blue-600 rounded-md flex items-center justify-center text-white">
+                  <CreditCard className="w-3.5 h-3.5" />
+                </div>
+                <span className="font-bold text-gray-900 text-sm">PayPro</span>
+              </div>
+
+              {/* Search Bar - Responsive */}
+              <div className="hidden sm:block ml-3 sm:ml-4 relative flex-1 max-w-xs md:max-w-md">
                 <input
                   type="text"
-                  placeholder="Search ReachPay services, bills, transactions..."
-                  className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-sm"
+                  placeholder="Search ReachPay services, bills..."
+                  className="w-full pl-9 pr-3 py-1.5 sm:py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-xs sm:text-sm"
                 />
-                <Search className="w-4 h-4 text-gray-400 absolute left-3 top-3" />
+                <Search className="w-4 h-4 text-gray-400 absolute left-3 top-2.5 sm:top-3" />
               </div>
             </div>
 
-            <div className="flex items-center space-x-3 sm:space-x-4">
+            <div className="flex items-center space-x-1.5 sm:space-x-3 shrink-0">
               {/* Interactive Role Switcher */}
-              <div className="flex items-center bg-gray-100 p-1 rounded-xl text-xs font-semibold">
+              <div className="flex items-center bg-gray-100 p-0.5 sm:p-1 rounded-xl text-[11px] sm:text-xs font-semibold">
                 <button
                   onClick={() => setUserRole('merchant')}
-                  className={`px-2.5 py-1 rounded-lg transition-all ${userRole === 'merchant'
+                  className={`px-2 sm:px-2.5 py-1 rounded-lg transition-all min-h-[32px] sm:min-h-0 flex items-center ${userRole === 'merchant'
                     ? 'bg-white text-blue-700 shadow-xs'
                     : 'text-gray-600 hover:text-gray-900'
                     }`}
@@ -1278,7 +1517,7 @@ const App = () => {
                 </button>
                 <button
                   onClick={() => setUserRole('admin')}
-                  className={`px-2.5 py-1 rounded-lg transition-all ${userRole === 'admin'
+                  className={`px-2 sm:px-2.5 py-1 rounded-lg transition-all min-h-[32px] sm:min-h-0 flex items-center ${userRole === 'admin'
                     ? 'bg-white text-blue-700 shadow-xs'
                     : 'text-gray-600 hover:text-gray-900'
                     }`}
@@ -1287,20 +1526,27 @@ const App = () => {
                 </button>
               </div>
 
-              <button className="relative p-2 text-gray-600 hover:text-gray-900 rounded-lg hover:bg-gray-100">
-                <Bell className="w-5 h-5" />
+              <button
+                className="relative p-2 text-gray-600 hover:text-gray-900 rounded-lg hover:bg-gray-100 min-w-[38px] min-h-[38px] flex items-center justify-center"
+                aria-label="Notifications"
+              >
+                <Bell className="w-4 h-4 sm:w-5 sm:h-5" />
                 <span className="absolute top-1.5 right-1.5 w-2 h-2 bg-red-500 rounded-full"></span>
               </button>
 
-              <div className="hidden sm:flex items-center">
+              <div className="hidden lg:flex items-center">
                 <div className="w-8 h-8 bg-blue-600 rounded-full flex items-center justify-center text-white">
                   <Users className="w-4 h-4" />
                 </div>
-                <span className="ml-2 text-sm font-medium text-gray-700">John Doe</span>
+                <span className="ml-2 text-sm font-medium text-gray-700 truncate max-w-[100px]">John Doe</span>
               </div>
 
-              <button className="p-2 text-gray-600 hover:text-gray-900 rounded-lg hover:bg-gray-100" title="Logout">
-                <LogOut className="w-5 h-5" />
+              <button
+                className="p-2 text-gray-600 hover:text-gray-900 rounded-lg hover:bg-gray-100 min-w-[38px] min-h-[38px] flex items-center justify-center"
+                title="Logout"
+                aria-label="Logout"
+              >
+                <LogOut className="w-4 h-4 sm:w-5 sm:h-5" />
               </button>
             </div>
           </div>
@@ -1308,7 +1554,7 @@ const App = () => {
 
         {/* Content Body */}
         <main className="flex-1 overflow-x-hidden overflow-y-auto bg-gray-50">
-          <div className="container mx-auto px-6 py-8 max-w-7xl">
+          <div className="container mx-auto px-3 sm:px-6 lg:px-8 py-4 sm:py-6 lg:py-8 max-w-7xl">
             {renderContent()}
           </div>
         </main>
