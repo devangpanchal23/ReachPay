@@ -4,7 +4,7 @@
 
 ## Implemented
 
-- One unified React/Vite project in `ReachPay_1/` for public pages, authentication, and the customer portal.
+- One unified React/Vite project at the repository root for public pages, authentication, and the customer portal.
 - Consolidated the usable financial domain, provider boundary, reconstructed financial schema draft, documentation, and tests into this project. The separate `ReachPay_Production/` directory has been removed.
 - Verified `/dashboard` now includes a responsive safe-mode settlement workspace; it does not show fabricated balances or enable financial writes.
 - Local and serverless `GET /api/health` report configuration while all unimplemented financial API routes fail closed.

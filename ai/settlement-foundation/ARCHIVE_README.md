@@ -1,6 +1,6 @@
 # ReachPay Production
 
-> Historical README copied for the consolidation record. Its local folder commands no longer apply. The current app root is `ReachPay_1/`; see the root `README.md` there and `MIGRATION_NOTES.md` in this archive for current status.
+> Historical README copied for the consolidation record. Its local folder commands no longer apply. The current app root is the repository root; see the root `README.md` and `MIGRATION_NOTES.md` in this archive for current status.
 
 An isolated settlement-operations application built beside the existing ReachPay prototype. The original dashboard and corporate site are not modified by this package.
 

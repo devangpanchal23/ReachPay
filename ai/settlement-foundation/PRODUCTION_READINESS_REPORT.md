@@ -1,6 +1,6 @@
 # ReachPay Production readiness report
 
-> Historical baseline copied during consolidation. Its statements describe the former isolated folder and are not current verification of the merged `ReachPay_1` project. See `ai/settlement-foundation/MIGRATION_NOTES.md`, `ai/settlement-foundation/audits/SETTLEMENT_FLOW_AUDIT.md`, and `ai/PRODUCTION_READINESS_REPORT.md` for the current state. The former UI/SQL source files were found NUL-filled and unusable.
+> Historical baseline copied during consolidation. Its statements describe the former isolated folder and are not current verification of the merged ReachPay project. See `ai/settlement-foundation/MIGRATION_NOTES.md`, `ai/settlement-foundation/audits/SETTLEMENT_FLOW_AUDIT.md`, and `ai/PRODUCTION_READINESS_REPORT.md` for the current state. The former UI/SQL source files were found NUL-filled and unusable.
 
 Date: 2026-10-05
 

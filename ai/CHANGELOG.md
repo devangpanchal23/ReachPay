@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-10-08 — Restructure and migrate project to repository root
+
+- Moved all application code, server modules, tests, configuration, and documentation from `ReachPay_1/` directly into the repository root.
+- Removed redundant `ReachPay_1/` folder.
+- Merged and updated root `.gitignore` to protect sensitive `.env` files, build output, and OS artifacts.
+- Updated path references to use `.env` and root directory paths.
+- Preserved 100% of financial, authentication, POS, and routing logic without alteration.
+
 ## 2026-10-06 — Consolidate into the single ReachPay_1 application
 
 - Moved the usable integer-paise domain, transaction state rules, provider boundary, tests, configuration and settlement architecture docs into `ReachPay_1/`.

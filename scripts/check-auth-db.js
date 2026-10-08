@@ -22,7 +22,7 @@ const requiredTables = [
 ];
 
 if (!process.env.DATABASE_URL) {
-  console.error('DATABASE_URL is missing. Add your PostgreSQL connection string to ReachPay_1/.env.');
+  console.error('DATABASE_URL is missing. Add your PostgreSQL connection string to .env.');
   process.exitCode = 1;
 } else {
   const pool = new pg.Pool({

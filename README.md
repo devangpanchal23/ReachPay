@@ -23,7 +23,7 @@ Signup validates name (2–100 characters), email (up to 254), password (12–12
 
 ReachPay supports two authentication modes:
 - **Out of the box (Zero external setup required):** The local server includes a persistent local JSON database engine (`server/data/reachpay-auth.json`). In local development, signup and login work immediately without installing PostgreSQL. One-time verification codes are output directly to your terminal console, and the universal development code `123456` (or the "⚡ Verify all" button) can be used on `/auth/verify` to instantly verify email and mobile.
-- **PostgreSQL & production mode:** Configure `DATABASE_URL`, `AUTH_OTP_SECRET`, `AUTH_RATE_LIMIT_SECRET`, SMTP credentials, and Twilio Verify in `ReachPay_1/.env`. Apply the PostgreSQL schema using:
+- **PostgreSQL & production mode:** Configure `DATABASE_URL`, `AUTH_OTP_SECRET`, `AUTH_RATE_LIMIT_SECRET`, SMTP credentials, and Twilio Verify in `.env`. Apply the PostgreSQL schema using:
 
 ```sh
 npm run db:check
