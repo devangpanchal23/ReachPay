@@ -8,10 +8,11 @@ pnpm-debug.log*
 lerna-debug.log*
 
 # Dependencies & Build Outputs
-node_modules
-dist
-dist-ssr
+node_modules/
+dist/
+dist-ssr/
 *.local
+*.tmp
 
 # Editor & System Files
 .vscode/*
@@ -29,4 +30,10 @@ dist-ssr
 .env
 .env.*
 !.env.example
-.vercel
+.vercel/
+
+# Server data
+server/data/
+
+# Temporary migration scripts
+migrate-to-root.sh
