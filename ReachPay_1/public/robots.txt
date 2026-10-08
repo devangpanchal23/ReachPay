@@ -1,0 +1,3 @@
+User-agent: *
+Allow: /
+Sitemap: https://reachpay.example/sitemap.xml

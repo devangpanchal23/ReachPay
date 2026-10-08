@@ -1,0 +1,9 @@
+# Signup and login unavailable; field validation hardening
+
+- **Date:** 2026-10-05
+- **Finding:** this workspace has no private `.env`, and `DATABASE_URL`, `AUTH_OTP_SECRET`, `AUTH_RATE_LIMIT_SECRET`, SMTP and Twilio configuration are absent. Auth persistence requires PostgreSQL; without it the API must reject signup/login rather than pretend to create an account.
+- **User-facing fix:** missing database/rate-limit setup now returns a clear 503 asking the customer to contact the administrator. Provider secrets remain private and are never logged or faked.
+- **Validation changes:** country-aware signup selector for all supported calling regions; India defaults to +91 plus exactly 10 numeric national digits. Country metadata sets field length limits and libphonenumber validates the final mobile number in both browser and server. Names, email, password, and login identifier have matching browser/server validation and field-level accessible errors. Input max lengths and numeric filtering prevent overlong mobile, name, email and password values.
+- **Files:** `shared/field-validation.js`, `shared/phone-validation.js`, `shared/phone-national-lengths.js`, `scripts/generate-phone-lengths.js`, `server/auth-core.js`, `server/auth-controller.js`, `src/site.jsx`, `src/site.css`, `tests/auth-core.test.js`, `.env.example`, `README.md`.
+- **Testing:** `npm test` passed 16/16; `npm run lint` passed; `npm run build` passed. Browser signup route confirmed the India (+91) selector, ten-digit number field, per-field help, password and consent controls render accessibly. Provider/database integration was not possible.
+- **Remaining blocker:** real account creation and OTP delivery require PostgreSQL configuration/migration, SMTP sender credentials, and Twilio Verify configuration. No real user account has been created during this work.
