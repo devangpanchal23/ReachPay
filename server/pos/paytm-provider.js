@@ -9,6 +9,7 @@
  */
 
 import { generateSignature, verifySignature } from './paytm-checksum.js';
+import { paytmSettlementProvider } from './paytm-settlement-provider.js';
 
 const PAYTM_HOSTS = {
   staging: {
@@ -43,6 +44,14 @@ export class PaytmPOSProvider {
     this.name = 'paytm_pos';
     this.defaultTimeoutMs = options.timeoutMs || 15_000;
     this.maxRetries = options.maxRetries || 2;
+  }
+
+  getSettlementAvailability(options) {
+    return paytmSettlementProvider.getAvailability(options);
+  }
+
+  getOrderSettlement(options) {
+    return paytmSettlementProvider.getOrderSettlement(options);
   }
 
   /**
@@ -224,13 +233,12 @@ export class PaytmPOSProvider {
       try {
         responseJson = JSON.parse(responseText);
       } catch {
-        throw new Error(`Invalid JSON response from Paytm EDC: ${responseText.slice(0, 200)}`);
+        throw new Error('PAYTM_INVALID_JSON_RESPONSE');
       }
 
       const resHead = responseJson.head || {};
       const resBody = responseJson.body || responseJson;
       const resultCode = resBody.resultCode || '';
-      const resultMsg = resBody.resultMsg || '';
       const resultStatus = resBody.resultStatus || '';
 
       const cpayId = resBody.cpayId || resBody.paymentRequestId || null;
@@ -247,16 +255,16 @@ export class PaytmPOSProvider {
         currency: 'INR',
         rawStatus: resBody.status || resultStatus,
         resultCode,
-        resultMsg,
+        resultMsg: isSuccessPushed ? 'Payment request accepted by Paytm.' : 'Paytm did not accept the POS payment request.',
         providerResponse: {
           head: resHead,
           body: { resultStatus, resultCode, cpayId },
         },
         message: isSuccessPushed
           ? 'Payment request sent to Paytm EDC terminal. Customer can now tap, insert card, or scan UPI.'
-          : `Terminal payment initiation failed: ${resultMsg || resultCode || 'Unknown error'}`,
+          : 'Paytm did not accept the POS payment request. Review the provider result code or contact support.',
       };
-    } catch (err) {
+    } catch {
       return {
         success: false,
         status: 'UNKNOWN',
@@ -265,7 +273,7 @@ export class PaytmPOSProvider {
         amountPaise: amount,
         currency: 'INR',
         resultCode: 'COMMUNICATION_ERROR',
-        resultMsg: err.message,
+        resultMsg: 'Paytm response was not definitive. Check provider status before retrying.',
         providerResponse: { errorCode: 'COMMUNICATION_ERROR' },
         message: 'Paytm did not return a definitive response. The payment state is unknown and must be reconciled before retrying.',
       };
@@ -321,7 +329,7 @@ export class PaytmPOSProvider {
       try {
         responseJson = JSON.parse(responseText);
       } catch {
-        throw new Error(`Invalid JSON status response: ${responseText.slice(0, 200)}`);
+        throw new Error('PAYTM_INVALID_JSON_STATUS_RESPONSE');
       }
 
       const resBody = responseJson.body || responseJson;
@@ -330,7 +338,6 @@ export class PaytmPOSProvider {
       const order = Array.isArray(resBody.Orders) ? resBody.Orders[0] : (resBody.Orders || {});
       const rawStatus = String(resBody.txnStatus || order.status || resultInfo.resultStatus || '').toUpperCase();
       const resultCode = String(resultInfo.resultCode || resBody.resultCode || '');
-      const resultMsg = resultInfo.resultMsg || resBody.resultMsg || '';
 
       // Normalize Paytm status
       let normalizedStatus = 'PENDING';
@@ -388,9 +395,9 @@ export class PaytmPOSProvider {
         cardNetwork,
         amountPaise: settledAmountPaise,
         resultCode,
-        resultMsg,
+        resultMsg: normalizedStatus === 'FAILED' ? 'Paytm reported a failed transaction.' : 'Provider transaction status was retrieved.',
         providerResponse: {
-          resultInfo,
+          resultInfo: { resultStatus: resultInfo.resultStatus || null, resultCode },
           status: rawStatus,
           paytmTxnId,
           rrn,
@@ -466,8 +473,8 @@ export class PaytmPOSProvider {
         merchantTxnId,
         cpayId,
         resultCode: resultInfo.resultCode,
-        resultMsg: resultInfo.resultMsg,
-        providerResponse: { resultStatus: resBody.resultStatus, resultCode: resBody.resultCode, resultMsg: resBody.resultMsg },
+        resultMsg: 'Paytm cancellation status was received.',
+        providerResponse: { resultStatus: resBody.resultStatus, resultCode: resultInfo.resultCode || resBody.resultCode },
       };
     } catch {
       return {

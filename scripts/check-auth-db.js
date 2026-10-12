@@ -8,21 +8,13 @@ const requiredTables = [
   'phone_otp_challenges',
   'auth_rate_limits',
   'auth_audit_events',
-  'financial_wallets',
-  'financial_user_controls',
-  'financial_ledger_accounts',
-  'financial_transactions',
-  'financial_journals',
-  'financial_ledger_entries',
-  'financial_transaction_status_history',
-  'financial_provider_events',
-  'financial_beneficiaries',
-  'financial_reconciliation_cases',
-  'financial_audit_logs',
 ];
 
 if (!process.env.DATABASE_URL) {
   console.error('DATABASE_URL is missing. Add your PostgreSQL connection string to .env.');
+  process.exitCode = 1;
+} else if (!['reachpay_dev', 'reachpay_test'].includes(new URL(process.env.DATABASE_URL).pathname.replace(/^\//, ''))) {
+  console.error('Refusing to inspect any database except reachpay_dev or reachpay_test.');
   process.exitCode = 1;
 } else {
   const pool = new pg.Pool({
@@ -41,7 +33,7 @@ if (!process.env.DATABASE_URL) {
       console.error(`PostgreSQL is reachable, but the ReachPay schema is incomplete (${missing.join(', ')}). Run: npm run db:migrate:auth`);
       process.exitCode = 1;
     } else {
-      console.log('PostgreSQL connection, customer-auth schema, and financial foundation schema are ready.');
+      console.log('PostgreSQL connection and customer-auth schema are ready.');
     }
   } catch (error) {
     const code = String(error?.code || '');

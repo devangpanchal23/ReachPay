@@ -5,10 +5,12 @@ import pg from 'pg';
 if (!process.env.DATABASE_URL) {
   process.stderr.write('DATABASE_URL is required to apply ReachPay schemas.\n');
   process.exitCode = 1;
+} else if (!['reachpay_dev', 'reachpay_test'].includes(new URL(process.env.DATABASE_URL).pathname.replace(/^\//, ''))) {
+  process.stderr.write('Refusing to migrate any database except reachpay_dev or reachpay_test.\n');
+  process.exitCode = 1;
 } else {
   const migrations = [
     ['customer authentication', new URL('../server/auth-migration.sql', import.meta.url)],
-    ['financial foundation', new URL('../database/migrations/001_financial_core.sql', import.meta.url)],
   ];
   const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: true } : undefined, max: 1, connectionTimeoutMillis: 5000 });
   const client = await pool.connect();
@@ -19,7 +21,7 @@ if (!process.env.DATABASE_URL) {
       process.stdout.write(`Applied ${name} schema.\n`);
     }
     await client.query('COMMIT');
-    process.stdout.write('ReachPay authentication and financial foundation schemas are ready.\n');
+    process.stdout.write('ReachPay customer authentication schema is ready.\n');
   } catch (error) {
     await client.query('ROLLBACK');
     process.stderr.write(`ReachPay schema migration failed${error?.code ? ` (PostgreSQL ${error.code})` : ''}. Check database connectivity, PostgreSQL version, and migration permissions.\n`);

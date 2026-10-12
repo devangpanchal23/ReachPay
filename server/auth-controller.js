@@ -17,6 +17,7 @@ let poolPromise;
 let migrationPromise;
 
 async function autoMigrate(p) {
+  if (isProduction()) return;
   try {
     const fs = await import('node:fs');
     const path = await import('node:path');
@@ -40,6 +41,10 @@ async function pool() {
   if (!isPostgresConfigured()) {
     return null;
   }
+  let database;
+  try { database = new URL(process.env.DATABASE_URL).pathname.replace(/^\//, ''); }
+  catch { throw new Error('DATABASE_NOT_CONFIGURED'); }
+  if (!['reachpay_dev','reachpay_test'].includes(database)) throw new Error('DATABASE_NOT_ALLOWED');
   if (!poolPromise) {
     poolPromise = import('pg').then(({ Pool }) => {
       const p = new Pool({

@@ -24,7 +24,7 @@ POST /api/contact
 - Local development rate limits use process memory; production requires shared Upstash Redis and fails closed without it.
 - No CMS/database-backed content editor or newsletter subscriber store is present.
 - `server/financial/` contains integer-paise money rules, state transitions, and provider interfaces. These are pure domain primitives only; they are not connected to financial persistence or provider APIs.
-- `database/migrations/001_financial_core.sql` is a reconstructed, un-applied financial foundation draft. `npm run db:migrate:auth` applies it with the customer authentication schema; no financial API uses it yet.
+- `database/migrations/001_financial_core.sql` is an archived draft containing an independent wallet ledger. It is not part of any migration runner and must not be applied. Current financial service requests use separate provider/funding references and never use this wallet schema.
 - Local and Vercel health routes expose safe-mode state. Money movement remains disabled.
 
 ## Security and deployment notes

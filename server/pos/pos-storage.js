@@ -2,7 +2,7 @@
  * ReachPay POS & Paytm Storage Repository
  *
  * Implements persistent storage for POS terminals, transactions, and audit logs.
- * Uses PostgreSQL when DATABASE_URL is configured, with seamless auto-migration.
+ * Uses PostgreSQL when DATABASE_URL is configured. Local development may apply additive schema checks.
  * Falls back to local persistent store (data/local-pos-store.json) for development.
  *
  * Security:
@@ -104,6 +104,7 @@ function loadStore() {
       terminals: [],
       transactions: [],
       syncLogs: [],
+      webhookEvents: [],
       version: 1,
     };
     fs.writeFileSync(LOCAL_STORE_FILE, JSON.stringify(initial, null, 2), 'utf8');
@@ -116,10 +117,11 @@ function loadStore() {
     if (!Array.isArray(localStoreCache.terminals)) localStoreCache.terminals = [];
     if (!Array.isArray(localStoreCache.transactions)) localStoreCache.transactions = [];
     if (!Array.isArray(localStoreCache.syncLogs)) localStoreCache.syncLogs = [];
+    if (!Array.isArray(localStoreCache.webhookEvents)) localStoreCache.webhookEvents = [];
     return localStoreCache;
   } catch (err) {
     console.warn('[pos-storage] Error reading local store file, initializing new:', err.message);
-    const initial = { terminals: [], transactions: [], syncLogs: [], version: 1 };
+    const initial = { terminals: [], transactions: [], syncLogs: [], webhookEvents: [], version: 1 };
     localStoreCache = initial;
     return initial;
   }
@@ -147,6 +149,10 @@ async function getPool() {
     if (production()) throw storageError(new Error('DATABASE_URL is not configured'));
     return null;
   }
+  let database;
+  try { database = new URL(dbUrl).pathname.replace(/^\//, ''); }
+  catch { throw storageError(new Error('DATABASE_URL is invalid')); }
+  if (!['reachpay_dev','reachpay_test'].includes(database)) throw storageError(new Error('DATABASE_NOT_ALLOWED'));
 
   if (!poolPromise) {
     poolPromise = import('pg')
@@ -168,12 +174,26 @@ async function getPool() {
 
   const p = await poolPromise;
   if (!p) throw storageError(new Error('PostgreSQL pool unavailable'));
+  if (p && !migrated && production()) {
+    migrated = true;
+    return p;
+  }
   if (p && !migrated) {
     try {
       const posSqlPath = path.join(__dirname, 'pos-migration.sql');
       if (fs.existsSync(posSqlPath)) {
         const sql = fs.readFileSync(posSqlPath, 'utf8');
-        await p.query(sql);
+        const client = await p.connect();
+        try {
+          await client.query('BEGIN');
+          await client.query(sql);
+          await client.query('COMMIT');
+        } catch (migrationError) {
+          await client.query('ROLLBACK').catch(() => {});
+          throw migrationError;
+        } finally {
+          client.release();
+        }
         console.log('[ReachPay POS DB] Schema verified and up to date.');
       }
       migrated = true;
@@ -223,7 +243,37 @@ export const posStorage = {
       : providerTerminals.find((t) => !t.user_id) || null;
   },
 
-  async saveTerminal({ userId = null, provider = 'paytm', mid, tid, merchantKey = null, environment = 'staging', clientId = 'reachpay' }) {
+  async listTerminals(userId) {
+    const p = await getPool();
+    if (p) {
+      const { rows } = await p.query(`SELECT id,user_id,provider,environment,mid,tid,client_id,store_id,external_mid,external_tid,
+        provider_verification_status,status,last_tested_at,last_status_message,created_at,updated_at
+        FROM pos_terminals WHERE user_id=$1 ORDER BY updated_at DESC`, [userId]);
+      return rows;
+    }
+    return loadStore().terminals.filter((terminal) => terminal.user_id === userId).map((terminal) => {
+      const safe = { ...terminal };
+      delete safe.encrypted_merchant_key;
+      delete safe.encrypted_merchant_key_iv;
+      delete safe.encrypted_merchant_key_tag;
+      return safe;
+    });
+  },
+
+  async disableTerminal(userId, id, provider) {
+    const p = await getPool();
+    if (p) {
+      const { rows } = await p.query(`UPDATE pos_terminals SET status='INACTIVE',updated_at=now()
+        WHERE id=$1 AND user_id=$2 AND provider=$3 RETURNING id,status,updated_at`, [id,userId,provider]);
+      return rows[0] || null;
+    }
+    const terminal = loadStore().terminals.find((entry) => entry.id === id && entry.user_id === userId && entry.provider === provider);
+    if (!terminal) return null;
+    terminal.status = 'INACTIVE'; terminal.updated_at = new Date().toISOString(); saveStore();
+    return { id: terminal.id, status: terminal.status, updated_at: terminal.updated_at };
+  },
+
+  async saveTerminal({ userId = null, provider = 'paytm', mid, tid, merchantKey = null, environment = 'staging', clientId = 'reachpay', storeId = null, externalMid = null, externalTid = null }) {
     const { encrypted, iv, tag } = merchantKey ? encryptSecret(merchantKey) : { encrypted: null, iv: null, tag: null };
     const p = await getPool();
     const now = new Date().toISOString();
@@ -231,23 +281,24 @@ export const posStorage = {
     if (p) {
       try {
         const { rows } = await p.query(
-          `INSERT INTO pos_terminals (user_id, provider, environment, mid, tid, client_id,
+          `INSERT INTO pos_terminals (user_id, provider, environment, mid, tid, client_id, store_id, external_mid, external_tid,
                                       encrypted_merchant_key, encrypted_merchant_key_iv, encrypted_merchant_key_tag,
                                       status, last_status_message, updated_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'UNTESTED', 'Terminal registered. Ready for test connection.', now())
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'UNTESTED', 'Terminal registered. Provider ownership unverified.', now())
            ON CONFLICT (provider, mid, tid, environment)
            DO UPDATE SET
              encrypted_merchant_key = EXCLUDED.encrypted_merchant_key,
              encrypted_merchant_key_iv = EXCLUDED.encrypted_merchant_key_iv,
              encrypted_merchant_key_tag = EXCLUDED.encrypted_merchant_key_tag,
              client_id = EXCLUDED.client_id,
+             store_id = EXCLUDED.store_id, external_mid = EXCLUDED.external_mid, external_tid = EXCLUDED.external_tid,
              user_id = COALESCE(EXCLUDED.user_id, pos_terminals.user_id),
              status = 'UNTESTED',
              last_status_message = 'Configuration updated.',
              updated_at = now()
            WHERE pos_terminals.user_id IS NOT DISTINCT FROM EXCLUDED.user_id
-           RETURNING id, user_id, provider, environment, mid, tid, client_id, status, last_tested_at, last_status_message`,
-          [userId || null, provider, environment, mid, tid, clientId, encrypted, iv, tag]
+           RETURNING id, user_id, provider, environment, mid, tid, client_id, store_id, external_mid, external_tid, provider_verification_status, status, last_tested_at, last_status_message`,
+          [userId || null, provider, environment, mid, tid, clientId, storeId, externalMid, externalTid, encrypted, iv, tag]
         );
         if (rows[0]) {
           this.syncLocalTerminal(rows[0], encrypted, iv, tag);
@@ -279,6 +330,10 @@ export const posStorage = {
         mid,
         tid,
         client_id: clientId,
+        store_id: storeId,
+        external_mid: externalMid,
+        external_tid: externalTid,
+        provider_verification_status: 'UNVERIFIED',
         encrypted_merchant_key: encrypted,
         encrypted_merchant_key_iv: iv,
         encrypted_merchant_key_tag: tag,
@@ -294,6 +349,9 @@ export const posStorage = {
       term.encrypted_merchant_key_iv = iv;
       term.encrypted_merchant_key_tag = tag;
       term.client_id = clientId;
+      term.store_id = storeId;
+      term.external_mid = externalMid;
+      term.external_tid = externalTid;
       term.user_id = userId || term.user_id;
       term.status = 'UNTESTED';
       term.last_status_message = 'Configuration updated.';
@@ -434,6 +492,13 @@ export const posStorage = {
       amount_paise: txData.amountPaise,
       currency: 'INR',
       status: txData.status || 'INITIATED',
+      settlement_status: 'NOT_AVAILABLE',
+      settlement_payout_id: null,
+      settled_amount_paise: null,
+      settled_at: null,
+      refund_status: null,
+      refunded_amount_paise: null,
+      reconciliation_status: 'PENDING',
       payment_method: null,
       rrn: null,
       auth_code: null,
@@ -524,7 +589,7 @@ export const posStorage = {
         const values = [merchantTxnId];
         let idx = 2;
 
-        const allowedFields = new Set(['cpay_id', 'status', 'payment_method', 'rrn', 'auth_code', 'card_last4', 'card_type', 'invoice_number', 'error_code', 'error_message', 'completed_at', 'metadata']);
+        const allowedFields = new Set(['cpay_id', 'status', 'payment_method', 'rrn', 'auth_code', 'card_last4', 'card_type', 'invoice_number', 'error_code', 'error_message', 'completed_at', 'metadata', 'settlement_status', 'settlement_payout_id', 'settled_amount_paise', 'settled_at', 'refund_status', 'refunded_amount_paise', 'reconciliation_status']);
         for (const [key, val] of Object.entries(safeFields)) {
           if (!allowedFields.has(key)) continue;
           if (key === 'metadata') {
@@ -596,6 +661,21 @@ export const posStorage = {
       .slice(0, limit);
   },
 
+  async getSettlementPendingTransactions({ limit = 20 } = {}) {
+    const p = await getPool();
+    if (p) {
+      const { rows } = await p.query(
+        `SELECT * FROM pos_transactions WHERE status = 'SUCCESS'
+         AND settlement_status IN ('SETTLEMENT_PENDING', 'NOT_AVAILABLE')
+         ORDER BY initiated_at ASC LIMIT $1`, [limit]
+      );
+      return rows;
+    }
+    return loadStore().transactions
+      .filter((t) => t.status === 'SUCCESS' && ['SETTLEMENT_PENDING', 'NOT_AVAILABLE'].includes(t.settlement_status))
+      .slice(0, limit);
+  },
+
   /**
    * List transactions with tenant isolation
    */
@@ -606,7 +686,8 @@ export const posStorage = {
         const { rows } = await p.query(
           `SELECT id, user_id, merchant_txn_id, cpay_id, mid, tid, amount_paise, currency, status,
                   payment_method, rrn, auth_code, invoice_number, card_last4, card_type,
-                  customer_mobile, notes, error_code, error_message, initiated_at, completed_at
+                  customer_mobile, notes, error_code, error_message, initiated_at, completed_at,
+                  settlement_status, settlement_payout_id, settled_amount_paise, settled_at, refund_status, refunded_amount_paise, reconciliation_status
            FROM pos_transactions
            WHERE ($1::text IS NULL OR status = $1)
              AND ($2::uuid IS NULL OR terminal_id = $2)
@@ -627,6 +708,127 @@ export const posStorage = {
     if (status) list = list.filter((t) => t.status === status);
     if (terminalId) list = list.filter((t) => t.terminal_id === terminalId);
     return list.slice(offset, offset + limit);
+  },
+
+  async enqueueReconciliation({ provider, merchantTxnId }) {
+    const p = await getPool();
+    if (p) {
+      await p.query(
+        `INSERT INTO pos_reconciliation_jobs (provider, merchant_txn_id)
+         VALUES ($1, $2) ON CONFLICT (provider, merchant_txn_id) DO UPDATE
+         SET status = 'READY', run_after = now(), last_error = NULL, updated_at = now()
+         WHERE pos_reconciliation_jobs.status IN ('FAILED', 'DONE')`,
+        [provider, merchantTxnId]
+      );
+      return;
+    }
+    const store = loadStore();
+    if (!Array.isArray(store.reconciliationJobs)) store.reconciliationJobs = [];
+    const current = store.reconciliationJobs.find((job) => job.provider === provider && job.merchant_txn_id === merchantTxnId);
+    if (!current) store.reconciliationJobs.push({ id: randomUUID(), provider, merchant_txn_id: merchantTxnId, status: 'READY', attempts: 0, run_after: Date.now() });
+    else if (['FAILED', 'DONE'].includes(current.status)) Object.assign(current, { status: 'READY', attempts: 0, run_after: Date.now(), last_error: null });
+    saveStore();
+  },
+
+  async claimReconciliationJobs({ limit = 20 } = {}) {
+    const p = await getPool();
+    if (p) {
+      const { rows } = await p.query(
+        `WITH due AS (
+          SELECT id FROM pos_reconciliation_jobs
+          WHERE (status = 'READY' AND run_after <= now())
+             OR (status = 'PROCESSING' AND locked_at < now() - interval '5 minutes')
+          ORDER BY run_after, id LIMIT $1 FOR UPDATE SKIP LOCKED
+        )
+        UPDATE pos_reconciliation_jobs j SET status = 'PROCESSING', attempts = j.attempts + 1,
+          locked_at = now(), updated_at = now()
+        FROM due WHERE j.id = due.id RETURNING j.*`,
+        [Math.min(Math.max(Number(limit) || 1, 1), 100)]
+      );
+      return rows;
+    }
+    const now = Date.now();
+    const selected = (loadStore().reconciliationJobs || []).filter((job) => (job.status === 'READY' && job.run_after <= now)
+      || (job.status === 'PROCESSING' && job.locked_at < now - 5 * 60_000)).slice(0, Math.min(Math.max(Number(limit) || 1, 1), 100));
+    for (const job of selected) Object.assign(job, { status: 'PROCESSING', attempts: job.attempts + 1, locked_at: now });
+    saveStore();
+    return selected;
+  },
+
+  async completeReconciliationJob(id) {
+    const p = await getPool();
+    if (p) return p.query("UPDATE pos_reconciliation_jobs SET status = 'DONE', locked_at = NULL, last_error = NULL, updated_at = now() WHERE id = $1", [id]);
+    const job = (loadStore().reconciliationJobs || []).find((item) => item.id === id || item.merchant_txn_id === id);
+    if (job) Object.assign(job, { status: 'DONE', locked_at: null, last_error: null });
+    saveStore();
+  },
+
+  async retryReconciliationJob(id, { attempts = 1, errorCode = 'PROVIDER_UNAVAILABLE', maxAttempts = 12 } = {}) {
+    const delayMs = Math.min(15 * 60_000, 1000 * (2 ** Math.min(attempts, 10)));
+    const nextStatus = attempts >= maxAttempts ? 'FAILED' : 'READY';
+    const p = await getPool();
+    if (p) return p.query(`UPDATE pos_reconciliation_jobs SET status = $2, run_after = now() + ($3 * interval '1 millisecond'), locked_at = NULL, last_error = $4, updated_at = now() WHERE id = $1`, [id, nextStatus, delayMs, String(errorCode).slice(0, 128)]);
+    const job = (loadStore().reconciliationJobs || []).find((item) => item.id === id || item.merchant_txn_id === id);
+    if (job) Object.assign(job, { status: nextStatus, run_after: Date.now() + delayMs, locked_at: null, last_error: String(errorCode).slice(0, 128) });
+    saveStore();
+  },
+
+  /** Atomically claim a durable provider event and apply its state update. */
+  async applyWebhookEvent({ provider, eventId, merchantTxnId, fields }) {
+    if (!provider || !eventId || !merchantTxnId || !fields || typeof fields !== 'object') throw new TypeError('Invalid webhook event.');
+    const safeEventId = String(eventId).slice(0, 128);
+    const p = await getPool();
+    if (p) {
+      const client = await p.connect();
+      try {
+        await client.query('BEGIN');
+        const claimed = await client.query(
+          `INSERT INTO pos_webhook_events (provider, event_id, merchant_txn_id)
+           VALUES ($1, $2, $3) ON CONFLICT (provider, event_id) DO NOTHING RETURNING id`,
+          [provider, safeEventId, merchantTxnId]
+        );
+        if (!claimed.rowCount) {
+          await client.query('COMMIT');
+          return { duplicate: true };
+        }
+        const allowed = new Set(['status', 'settlement_status', 'payment_method', 'rrn', 'auth_code', 'error_code', 'error_message', 'completed_at', 'metadata']);
+        const sets = [];
+        const values = [merchantTxnId];
+        for (const [key, value] of Object.entries(fields)) {
+          if (!allowed.has(key)) continue;
+          values.push(key === 'metadata' ? JSON.stringify(sanitizeSensitiveData(value)) : value);
+          sets.push(key === 'metadata' ? `metadata = COALESCE(metadata, '{}'::jsonb) || $${values.length}::jsonb` : `${key} = $${values.length}`);
+        }
+        if (!sets.length) throw new TypeError('No supported webhook update fields.');
+        sets.push('updated_at = now()');
+        const stateGuard = fields.status ? ` AND (status NOT IN ('SUCCESS', 'FAILED', 'CANCELLED', 'EXPIRED', 'REFUNDED') OR status = $${values.findIndex((value, index) => index > 0 && value === fields.status) + 1})` : '';
+        const updated = await client.query(`UPDATE pos_transactions SET ${sets.join(', ')} WHERE merchant_txn_id = $1${stateGuard} RETURNING *`, values);
+        if (!updated.rowCount) {
+          const current = await client.query('SELECT * FROM pos_transactions WHERE merchant_txn_id = $1', [merchantTxnId]);
+          if (!current.rowCount) throw new Error('WEBHOOK_TRANSACTION_NOT_FOUND');
+          await client.query('COMMIT');
+          return { duplicate: false, ignoredTransition: true, transaction: current.rows[0] };
+        }
+        await client.query('COMMIT');
+        this.syncLocalTx(updated.rows[0]);
+        return { duplicate: false, transaction: updated.rows[0] };
+      } catch (error) {
+        await client.query('ROLLBACK').catch(() => {});
+        throw storageError(error);
+      } finally {
+        client.release();
+      }
+    }
+    const store = loadStore();
+    if (store.webhookEvents.some((event) => event.provider === provider && event.event_id === safeEventId)) return { duplicate: true };
+    const transaction = store.transactions.find((item) => item.merchant_txn_id === merchantTxnId);
+    if (!transaction) throw new Error('WEBHOOK_TRANSACTION_NOT_FOUND');
+    const terminalStates = ['SUCCESS', 'FAILED', 'CANCELLED', 'EXPIRED', 'REFUNDED'];
+    const ignoredTransition = fields.status && terminalStates.includes(transaction.status) && transaction.status !== fields.status;
+    if (!ignoredTransition) Object.assign(transaction, fields, { updated_at: new Date().toISOString() });
+    store.webhookEvents.push({ provider, event_id: safeEventId, merchant_txn_id: merchantTxnId, created_at: new Date().toISOString() });
+    saveStore();
+    return { duplicate: false, ignoredTransition, transaction };
   },
 
   /**

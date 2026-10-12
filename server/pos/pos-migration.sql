@@ -55,6 +55,13 @@ CREATE TABLE IF NOT EXISTS pos_transactions (
   amount_paise bigint NOT NULL CHECK (amount_paise > 0),
   currency varchar(3) NOT NULL DEFAULT 'INR',
   status varchar(32) NOT NULL DEFAULT 'INITIATED',
+  settlement_status varchar(32) NOT NULL DEFAULT 'NOT_AVAILABLE',
+  settlement_payout_id varchar(128),
+  settled_amount_paise bigint,
+  settled_at timestamptz,
+  refund_status varchar(32),
+  refunded_amount_paise bigint,
+  reconciliation_status varchar(32) NOT NULL DEFAULT 'PENDING',
   payment_method varchar(32),
   rrn varchar(32),
   auth_code varchar(32),
@@ -71,6 +78,14 @@ CREATE TABLE IF NOT EXISTS pos_transactions (
   completed_at timestamptz,
   updated_at timestamptz NOT NULL DEFAULT now()
 );
+
+ALTER TABLE pos_transactions ADD COLUMN IF NOT EXISTS settlement_status varchar(32) NOT NULL DEFAULT 'NOT_AVAILABLE';
+ALTER TABLE pos_transactions ADD COLUMN IF NOT EXISTS settlement_payout_id varchar(128);
+ALTER TABLE pos_transactions ADD COLUMN IF NOT EXISTS settled_amount_paise bigint;
+ALTER TABLE pos_transactions ADD COLUMN IF NOT EXISTS settled_at timestamptz;
+ALTER TABLE pos_transactions ADD COLUMN IF NOT EXISTS refund_status varchar(32);
+ALTER TABLE pos_transactions ADD COLUMN IF NOT EXISTS refunded_amount_paise bigint;
+ALTER TABLE pos_transactions ADD COLUMN IF NOT EXISTS reconciliation_status varchar(32) NOT NULL DEFAULT 'PENDING';
 
 -- Ensure check constraint on pos_transactions covers all lifecycle states
 DO $$
@@ -114,3 +129,30 @@ END $$;
 
 CREATE INDEX IF NOT EXISTS pos_sync_logs_terminal_time_idx ON pos_sync_logs(terminal_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS pos_sync_logs_user_time_idx ON pos_sync_logs(user_id, created_at DESC);
+
+-- Durable callback deduplication. Never store the signed provider payload.
+CREATE TABLE IF NOT EXISTS pos_webhook_events (
+  id bigserial PRIMARY KEY,
+  provider varchar(32) NOT NULL,
+  event_id varchar(128) NOT NULL,
+  merchant_txn_id varchar(64) NOT NULL,
+  processing_status varchar(16) NOT NULL DEFAULT 'APPLIED' CHECK (processing_status IN ('APPLIED', 'REJECTED')),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (provider, event_id)
+);
+CREATE INDEX IF NOT EXISTS pos_webhook_events_txn_idx ON pos_webhook_events(provider, merchant_txn_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS pos_reconciliation_jobs (
+  id bigserial PRIMARY KEY,
+  provider varchar(32) NOT NULL,
+  merchant_txn_id varchar(64) NOT NULL,
+  status varchar(16) NOT NULL DEFAULT 'READY' CHECK (status IN ('READY', 'PROCESSING', 'DONE', 'FAILED')),
+  attempts integer NOT NULL DEFAULT 0,
+  run_after timestamptz NOT NULL DEFAULT now(),
+  locked_at timestamptz,
+  last_error varchar(128),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (provider, merchant_txn_id)
+);
+CREATE INDEX IF NOT EXISTS pos_reconciliation_ready_idx ON pos_reconciliation_jobs(status, run_after, id);
