@@ -245,6 +245,7 @@ export async function handlePOSRequest(req, action, body = {}, providerName = 'p
         const tx = await posStorage.getTransactionByMerchantTxnId(merchantTxnId, user.id);
         if (!tx || tx.provider !== 'phonepe') return { status: 404, body: { error: 'NOT_FOUND' } };
         if (['INITIATED', 'PENDING', 'UNKNOWN'].includes(tx.status)) {
+          if (!provider.isConfigured()) return { status: 503, body: { ok: false, ...integration, transaction: sanitizeTransaction(tx) } };
           const status = await provider.getTransactionStatus({ mid: tx.mid, merchantTxnId });
           if (status.amountPaise != null && status.amountPaise !== Number(tx.amount_paise)) return { status: 502, body: { error: 'PHONEPE_AMOUNT_MISMATCH', transaction: sanitizeTransaction(tx) } };
           if (status.status !== 'UNKNOWN' && status.status !== tx.status) {
@@ -786,6 +787,7 @@ export async function handlePOSRequest(req, action, body = {}, providerName = 'p
 export async function handlePhonePeWebhook(req, body = {}) {
   try {
     const provider = getPOSProvider('phonepe');
+    if (!provider.isConfigured()) return { status: 503, body: { success: false, error: 'PHONEPE_PARTNER_CONTRACT_REQUIRED', message: provider.getIntegrationStatus().message } };
     const response = body?.response;
     const signature = req.headers['x-verify'];
     if (typeof response !== 'string' || !provider.verifyCallback(response, signature)) {

@@ -1,10 +1,17 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import { mkdtemp, rm } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import { generateSignature, verifySignature, PaytmChecksum } from '../server/pos/paytm-checksum.js';
-import { encryptSecret, decryptSecret, posStorage } from '../server/pos/pos-storage.js';
 import { PaytmPOSProvider } from '../server/pos/paytm-provider.js';
-import { handlePOSRequest, handleWebhook } from '../server/pos/pos-controller.js';
+
+const testStoreDir = await mkdtemp(path.join(os.tmpdir(), 'reachpay-pos-paytm-test-'));
+process.env.REACHPAY_POS_STORE_FILE = path.join(testStoreDir, 'local-pos-store.json');
+const { encryptSecret, decryptSecret, posStorage } = await import('../server/pos/pos-storage.js');
+const { handlePOSRequest, handleWebhook } = await import('../server/pos/pos-controller.js');
+test.after(async () => rm(testStoreDir, { recursive: true, force: true }));
 
 const TEST_MERCHANT_KEY = '23b5d2787e914041b6c085cb2091ecbf';
 const TEST_MID = 'MERCHANT_TEST_MID';

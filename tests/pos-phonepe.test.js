@@ -3,8 +3,9 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { getPOSProvider, posProviders } from '../server/pos/provider-registry.js';
 import { PhonePePOSProvider, phonePePOSProvider } from '../server/pos/phonepe-provider.js';
+import { handlePhonePeWebhook } from '../server/pos/pos-controller.js';
 
-const envKeys = ['PHONEPE_POS_ENV', 'PHONEPE_POS_SALT_KEY', 'PHONEPE_POS_SALT_INDEX', 'PHONEPE_POS_STORE_ID', 'PHONEPE_POS_PROVIDER_ID'];
+const envKeys = ['PHONEPE_POS_ENV', 'PHONEPE_POS_SALT_KEY', 'PHONEPE_POS_SALT_INDEX', 'PHONEPE_POS_STORE_ID', 'PHONEPE_POS_PROVIDER_ID', 'PHONEPE_POS_CONTRACT_CONFIRMED'];
 function setEnv(values) { for (const key of envKeys) { if (key in values) process.env[key] = values[key]; else delete process.env[key]; } }
 function sha(value) { return createHash('sha256').update(value).digest('hex'); }
 
@@ -18,13 +19,29 @@ test('PhonePe provider reports exactly which merchant credentials and enablement
   setEnv({});
   const result = phonePePOSProvider.getIntegrationStatus();
   assert.equal(result.connected, false);
-  assert.equal(result.status, 'CREDENTIALS_REQUIRED');
+  assert.equal(result.status, 'PARTNER_CONTRACT_REQUIRED');
   assert.equal(result.sandboxTestable, false);
-  assert.match(result.message, /MID\/TID references do not authenticate/);
+  assert.match(result.message, /do not publish an executable EDC API contract/);
 });
 
-test('PhonePe EDC sale uses documented endpoint, payload and X-VERIFY construction', async () => {
+test('PhonePe EDC calls stay disabled without private partner contract confirmation', async () => {
   setEnv({ PHONEPE_POS_ENV: 'uat', PHONEPE_POS_SALT_KEY: 'test-salt', PHONEPE_POS_SALT_INDEX: '1', PHONEPE_POS_STORE_ID: 'store-1' });
+  let called = false;
+  const provider = new PhonePePOSProvider({ fetchImpl: async () => { called = true; throw new Error('should not call network'); } });
+  assert.equal(provider.isConfigured(), false);
+  await assert.rejects(provider.initiateSale({ mid: 'merchant-1', tid: 'terminal-1', merchantTxnId: 'RP_TX_123', amountPaise: 1250 }), /PHONEPE_PARTNER_CONTRACT_REQUIRED/);
+  assert.equal(called, false);
+});
+
+test('PhonePe callbacks are rejected as unavailable until the partner contract is confirmed', async () => {
+  setEnv({});
+  const result = await handlePhonePeWebhook({ headers: { 'x-verify': 'untrusted' } }, { response: 'untrusted' });
+  assert.equal(result.status, 503);
+  assert.equal(result.body.error, 'PHONEPE_PARTNER_CONTRACT_REQUIRED');
+});
+
+test('PhonePe provisional adapter payload and X-VERIFY construction are covered only behind contract gate', async () => {
+  setEnv({ PHONEPE_POS_ENV: 'uat', PHONEPE_POS_SALT_KEY: 'test-salt', PHONEPE_POS_SALT_INDEX: '1', PHONEPE_POS_STORE_ID: 'store-1', PHONEPE_POS_CONTRACT_CONFIRMED: 'true' });
   let sent;
   const provider = new PhonePePOSProvider({ fetchImpl: async (url, options) => {
     sent = { url, ...options };
@@ -41,8 +58,8 @@ test('PhonePe EDC sale uses documented endpoint, payload and X-VERIFY constructi
   assert.equal(sent.headers['X-VERIFY'], `${sha(`${encoded}/v1/edc/transaction/inittest-salt`)}###1`);
 });
 
-test('PhonePe status signature and status mapping match the documented contract', async () => {
-  setEnv({ PHONEPE_POS_ENV: 'production', PHONEPE_POS_SALT_KEY: 'test-salt', PHONEPE_POS_SALT_INDEX: '2', PHONEPE_POS_STORE_ID: 'store-1' });
+test('PhonePe provisional status adapter mapping is covered only behind contract gate', async () => {
+  setEnv({ PHONEPE_POS_ENV: 'production', PHONEPE_POS_SALT_KEY: 'test-salt', PHONEPE_POS_SALT_INDEX: '2', PHONEPE_POS_STORE_ID: 'store-1', PHONEPE_POS_CONTRACT_CONFIRMED: 'true' });
   let sent;
   const provider = new PhonePePOSProvider({ fetchImpl: async (url, options) => {
     sent = { url, ...options };
@@ -58,7 +75,7 @@ test('PhonePe status signature and status mapping match the documented contract'
 });
 
 test('PhonePe callbacks require matching X-VERIFY salt index and digest', () => {
-  setEnv({ PHONEPE_POS_SALT_KEY: 'callback-salt', PHONEPE_POS_SALT_INDEX: '7' });
+  setEnv({ PHONEPE_POS_SALT_KEY: 'callback-salt', PHONEPE_POS_SALT_INDEX: '7', PHONEPE_POS_CONTRACT_CONFIRMED: 'true' });
   const response = Buffer.from(JSON.stringify({ success: true })).toString('base64');
   assert.equal(phonePePOSProvider.verifyCallback(response, `${sha(`${response}callback-salt`)}###7`), true);
   assert.equal(phonePePOSProvider.verifyCallback(response, `${sha(`${response}wrong`)}###7`), false);
@@ -66,8 +83,8 @@ test('PhonePe callbacks require matching X-VERIFY salt index and digest', () => 
   setEnv({});
 });
 
-test('PhonePe reconciliation uses documented search request envelope and maps authoritative status', async () => {
-  setEnv({ PHONEPE_POS_ENV: 'uat', PHONEPE_POS_SALT_KEY: 'search-salt', PHONEPE_POS_SALT_INDEX: '3', PHONEPE_POS_STORE_ID: 'store-1' });
+test('PhonePe provisional reconciliation adapter is covered only behind contract gate', async () => {
+  setEnv({ PHONEPE_POS_ENV: 'uat', PHONEPE_POS_SALT_KEY: 'search-salt', PHONEPE_POS_SALT_INDEX: '3', PHONEPE_POS_STORE_ID: 'store-1', PHONEPE_POS_CONTRACT_CONFIRMED: 'true' });
   let sent;
   const provider = new PhonePePOSProvider({ fetchImpl: async (url, options) => {
     sent = { url, ...options };

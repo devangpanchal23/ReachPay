@@ -43,28 +43,32 @@ export class PhonePePOSProvider {
       providerId: process.env.PHONEPE_POS_PROVIDER_ID || '',
       storeId: process.env.PHONEPE_POS_STORE_ID || '',
       callbackUrl: process.env.PHONEPE_POS_CALLBACK_URL || '',
+      contractConfirmed: process.env.PHONEPE_POS_CONTRACT_CONFIRMED === 'true',
     };
   }
 
   getIntegrationStatus() {
     const config = this.getConfig();
-    const configured = Boolean(config.saltKey && config.saltIndex && config.storeId);
-    const status = configured ? 'CONFIGURED_AWAITING_MERCHANT_ENABLEMENT' : 'CREDENTIALS_REQUIRED';
+    const credentialsPresent = Boolean(config.saltKey && config.saltIndex && config.storeId);
+    const configured = credentialsPresent && config.contractConfirmed;
+    const status = !config.contractConfirmed ? 'PARTNER_CONTRACT_REQUIRED' : (configured ? 'CONFIGURED_AWAITING_MERCHANT_ENABLEMENT' : 'CREDENTIALS_REQUIRED');
     return {
       provider: this.name, status, connected: false,
-      sandboxTestable: configured && config.environment !== 'production',
+      sandboxTestable: false,
       environment: config.environment,
       capabilities: this.capabilities,
-      requirements: ['PhonePe-issued EDC salt key and salt index', 'PhonePe-generated Store ID', 'EDC Sale API enabled for merchant', 'Terminal configured in integrated mode', 'Public HTTPS callback URL for event-driven updates'],
+      requirements: ['PhonePe Offline Partner onboarding', 'PhonePe-provided private EDC API contract and sandbox details', 'PhonePe-issued EDC credentials and merchant/device enablement'],
       message: configured
         ? 'Credentials are configured. A signed API call is required to verify PhonePe enablement and terminal setup.'
-        : 'PhonePe Integrated EDC is documented, but MID/TID references do not authenticate requests. Configure the PhonePe-issued salt key/index and Store ID on the server, and have PhonePe enable Integrated EDC for this merchant and terminal.',
+        : (!config.contractConfirmed
+          ? 'PhonePe partner materials describe onboarding but do not publish an executable EDC API contract. API calls remain disabled until the private PhonePe contract is reviewed and this server-side confirmation is set.'
+          : 'Configure PhonePe-issued EDC credentials and obtain merchant and terminal enablement.'),
     };
   }
 
   isConfigured() {
     const c = this.getConfig();
-    return Boolean(c.saltKey && c.saltIndex && c.storeId);
+    return Boolean(c.contractConfirmed && c.saltKey && c.saltIndex && c.storeId);
   }
 
   signature(payload, path) {
@@ -76,13 +80,14 @@ export class PhonePePOSProvider {
 
   verifyCallback(response, signature) {
     const c = this.getConfig();
-    if (!c.saltKey || !c.saltIndex || typeof response !== 'string' || typeof signature !== 'string') return false;
+    if (!c.contractConfirmed || !c.saltKey || !c.saltIndex || typeof response !== 'string' || typeof signature !== 'string') return false;
     const [digest, index] = signature.split('###');
     return index === c.saltIndex && constantTimeEqual(digest, sha256(`${response}${c.saltKey}`));
   }
 
   async request(path, { payload, callbackUrl } = {}) {
     const c = this.getConfig();
+    if (!c.contractConfirmed) throw new Error('PHONEPE_PARTNER_CONTRACT_REQUIRED');
     if (!this.isConfigured()) throw new Error('PHONEPE_CREDENTIALS_REQUIRED');
     const encoded = payload == null ? null : Buffer.from(JSON.stringify(payload)).toString('base64');
     const headers = { 'Content-Type': 'application/json', 'X-VERIFY': this.signature(encoded, path) };

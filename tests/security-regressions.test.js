@@ -1,10 +1,17 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import { mkdtemp, rm } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import { hashOtp } from '../server/auth-core.js';
 import { localAuthDb } from '../server/auth-storage.js';
-import { encryptSecret, posStorage } from '../server/pos/pos-storage.js';
 import { rateAllowed } from '../server/auth-controller.js';
+
+const testStoreDir = await mkdtemp(path.join(os.tmpdir(), 'reachpay-security-test-'));
+process.env.REACHPAY_POS_STORE_FILE = path.join(testStoreDir, 'local-pos-store.json');
+const { encryptSecret, posStorage } = await import('../server/pos/pos-storage.js');
+test.after(async () => rm(testStoreDir, { recursive: true, force: true }));
 
 test('production verifier rejects the development OTP even when a stale local challenge contains it', async () => {
   const userId = randomUUID();

@@ -19,7 +19,9 @@ import { fileURLToPath } from 'node:url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const DATA_DIR = path.resolve(__dirname, '../../data');
-const LOCAL_STORE_FILE = path.join(DATA_DIR, 'local-pos-store.json');
+const LOCAL_STORE_FILE = process.env.NODE_ENV !== 'production' && process.env.REACHPAY_POS_STORE_FILE
+  ? path.resolve(process.env.REACHPAY_POS_STORE_FILE)
+  : path.join(DATA_DIR, 'local-pos-store.json');
 const production = () => process.env.NODE_ENV === 'production';
 function storageError(cause) {
   const error = new Error('POS_DATABASE_UNAVAILABLE');
