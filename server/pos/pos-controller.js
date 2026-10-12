@@ -7,7 +7,7 @@
  * and sync audit logging.
  */
 
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { currentUser, originOk, rateAllowed } from '../auth-controller.js';
 import { posStorage, decryptSecret } from './pos-storage.js';
 import { paytmPOSProvider } from './paytm-provider.js';
@@ -105,6 +105,11 @@ function sanitizeTerminal(terminal) {
     tid: terminal.tid,
     environment: terminal.environment || 'staging',
     clientId: terminal.client_id || 'reachpay',
+    storeId: terminal.store_id || null,
+    externalMid: terminal.external_mid || null,
+    externalTid: terminal.external_tid || null,
+    providerVerificationStatus: terminal.provider_verification_status || 'UNVERIFIED',
+    providerVerified: terminal.provider_verification_status === 'VERIFIED',
     status: terminal.status || 'UNTESTED',
     lastTestedAt: terminal.last_tested_at || null,
     lastStatusMessage: terminal.last_status_message || null,
@@ -191,28 +196,33 @@ export async function handlePOSRequest(req, action, body = {}, providerName = 'p
   if (providerName === 'phonepe') {
     try {
       const integration = provider.getIntegrationStatus();
+      if (action === 'terminals' && method === 'GET') return { status: 200, body: { terminals: (await posStorage.listTerminals(user.id)).map(sanitizeTerminal) } };
+      if (action === 'terminal-disable' && method === 'POST') {
+        const terminal = await posStorage.disableTerminal(user.id, String(body.terminalId || ''), providerName);
+        return terminal ? { status: 200, body: { terminal } } : { status: 404, body: { error: 'TERMINAL_NOT_FOUND' } };
+      }
       if (action === 'config' && method === 'GET') {
         const terminal = await posStorage.getTerminal(user.id, 'phonepe');
-        return { status: 200, body: { ok: true, provider: 'phonepe', integration, terminal: sanitizeTerminal(terminal), isConfigured: Boolean(terminal && provider.isConfigured()), sandboxTestable: integration.sandboxTestable } };
+        const terminalIntegration = provider.getIntegrationStatus({ storeId: terminal?.store_id, environment: terminal?.environment });
+        return { status: 200, body: { ok: true, provider: 'phonepe', integration: terminalIntegration, terminal: sanitizeTerminal(terminal), isConfigured: Boolean(terminal && provider.isConfigured({ storeId: terminal.store_id, environment: terminal.environment })), sandboxTestable: terminalIntegration.sandboxTestable } };
       }
       if (action === 'config' && method === 'POST') {
-        const { mid, tid, environment } = body;
+        const { mid, tid, environment, storeId, externalMid, externalTid } = body;
         if (!String(mid || '').trim() || !String(tid || '').trim()) return { status: 400, body: { ok: false, error: 'VALIDATION_ERROR', message: 'PhonePe merchant and terminal references are required.' } };
         const env = environment || (process.env.PHONEPE_POS_ENV === 'production' ? 'production' : 'staging');
         if (!['staging', 'production'].includes(env)) return { status: 400, body: { ok: false, error: 'UNSUPPORTED_ENVIRONMENT' } };
-        const terminal = await posStorage.saveTerminal({ userId: user.id, provider: 'phonepe', mid: String(mid).trim(), tid: String(tid).trim(), environment: env, clientId: 'reachpay' });
+        const terminal = await posStorage.saveTerminal({ userId: user.id, provider: 'phonepe', mid: String(mid).trim(), tid: String(tid).trim(), environment: env, clientId: 'reachpay', storeId: storeId ? String(storeId).trim() : null, externalMid: externalMid ? String(externalMid).trim() : null, externalTid: externalTid ? String(externalTid).trim() : null });
         await posStorage.recordSyncLog({ terminalId: terminal.id, userId: user.id, provider: 'phonepe', action: 'CONFIG_UPDATE', status: 'SUCCESS', message: 'PhonePe terminal references saved.' });
         return { status: 200, body: { ok: true, terminal: sanitizeTerminal(terminal), integration, message: integration.message } };
       }
       if (action === 'test-connection' && method === 'POST') {
-        if (!provider.isConfigured()) return { status: 503, body: { ok: false, ...integration, terminalStatus: integration.status } };
         const terminal = await posStorage.getTerminal(user.id, 'phonepe');
         if (!terminal) return { status: 400, body: { ok: false, error: 'TERMINAL_NOT_CONFIGURED' } };
-        const result = await provider.testConnection({ mid: terminal.mid, tid: terminal.tid });
+        if (!provider.isConfigured({ storeId: terminal.store_id, environment: terminal.environment })) return { status: 503, body: { ok: false, ...provider.getIntegrationStatus({ storeId: terminal.store_id, environment: terminal.environment }), terminalStatus: integration.status } };
+        const result = await provider.testConnection({ mid: terminal.mid, tid: terminal.tid, storeId: terminal.store_id, environment: terminal.environment });
         return { status: result.connected ? 200 : 503, body: { ok: result.connected, ...result } };
       }
       if (action === 'initiate-sale' && method === 'POST') {
-        if (!provider.isConfigured()) return { status: 503, body: { ok: false, error: 'PHONEPE_CREDENTIALS_REQUIRED', ...integration } };
         const { amount, notes } = body;
         const idempotencyKey = String(req.headers['idempotency-key'] || body.idempotencyKey || '').trim();
         if (!/^[A-Za-z0-9._:-]{8,128}$/.test(idempotencyKey)) return { status: 400, body: { error: 'IDEMPOTENCY_KEY_REQUIRED' } };
@@ -224,18 +234,20 @@ export async function handlePOSRequest(req, action, body = {}, providerName = 'p
           : { status: 409, body: { error: 'IDEMPOTENCY_KEY_CONFLICT' } };
         const terminal = await posStorage.getTerminal(user.id, 'phonepe');
         if (!terminal) return { status: 400, body: { error: 'TERMINAL_NOT_CONFIGURED' } };
+        if (!provider.isConfigured({ storeId: terminal.store_id, environment: terminal.environment })) return { status: 503, body: { ok: false, error: 'PHONEPE_PRODUCTION_ACTIVATION_OR_CREDENTIALS_REQUIRED', ...provider.getIntegrationStatus({ storeId: terminal.store_id, environment: terminal.environment }) } };
         const merchantTxnId = `RP_${Date.now()}_${randomUUID().replaceAll('-', '').slice(0, 12)}`;
         const tx = await posStorage.createTransaction({ userId: user.id, terminalId: terminal.id, provider: 'phonepe', environment: terminal.environment, merchantTxnId, mid: terminal.mid, tid: terminal.tid, amountPaise, idempotencyKey, status: 'INITIATED', notes: notes ? String(notes).slice(0, 500) : null, metadata: { createdBy: user.email || user.name } });
         if (tx.idempotentReplay) return { status: 200, body: { ok: true, idempotentReplay: true, transaction: sanitizeTransaction(tx) } };
         let result;
         try {
-          result = await provider.initiateSale({ mid: terminal.mid, tid: terminal.tid, merchantTxnId, amountPaise });
+          result = await provider.initiateSale({ mid: terminal.mid, tid: terminal.tid, storeId: terminal.store_id, environment: terminal.environment, merchantTxnId, amountPaise });
         } catch (error) {
           const updated = await posStorage.updateTransaction(merchantTxnId, { status: 'UNKNOWN', error_code: error.message === 'PHONEPE_REQUEST_TIMEOUT' ? 'REQUEST_TIMEOUT' : 'UPSTREAM_UNAVAILABLE', error_message: 'PhonePe response was not definitive. Check status before retrying.' }, user.id);
           await posStorage.recordSyncLog({ terminalId: terminal.id, userId: user.id, provider: 'phonepe', action: 'INITIATE_SALE', status: 'ERROR', message: 'PhonePe initiation result was indeterminate; transaction retained for reconciliation.', details: { merchantTxnId } });
           return { status: 202, body: { ok: false, pendingVerification: true, message: 'PhonePe did not return a definitive response. Check this transaction status before retrying.', transaction: sanitizeTransaction(updated || tx) } };
         }
         const updated = await posStorage.updateTransaction(merchantTxnId, { cpay_id: merchantTxnId, status: result.status, error_code: result.success ? null : result.resultCode, error_message: result.success ? null : result.message, metadata: { phonepeInitiationCode: result.resultCode } }, user.id);
+        if (['PENDING', 'UNKNOWN', 'SUCCESS'].includes(result.status)) await posStorage.enqueueReconciliation({ provider: 'phonepe', merchantTxnId });
         await posStorage.recordSyncLog({ terminalId: terminal.id, userId: user.id, provider: 'phonepe', action: 'INITIATE_SALE', status: result.success ? 'SUCCESS' : 'FAILURE', message: result.message, details: { merchantTxnId, amountPaise } });
         return { status: result.success ? 200 : 502, body: { ok: result.success, message: result.message, transaction: sanitizeTransaction(updated || tx) } };
       }
@@ -245,10 +257,11 @@ export async function handlePOSRequest(req, action, body = {}, providerName = 'p
         const tx = await posStorage.getTransactionByMerchantTxnId(merchantTxnId, user.id);
         if (!tx || tx.provider !== 'phonepe') return { status: 404, body: { error: 'NOT_FOUND' } };
         if (['INITIATED', 'PENDING', 'UNKNOWN'].includes(tx.status)) {
-          const status = await provider.getTransactionStatus({ mid: tx.mid, merchantTxnId });
+          const terminal = await posStorage.getTerminal(user.id, 'phonepe', { mid: tx.mid, tid: tx.tid });
+          const status = await provider.getTransactionStatus({ mid: tx.mid, tid: tx.tid, merchantTxnId, storeId: terminal?.store_id, environment: terminal?.environment });
           if (status.amountPaise != null && status.amountPaise !== Number(tx.amount_paise)) return { status: 502, body: { error: 'PHONEPE_AMOUNT_MISMATCH', transaction: sanitizeTransaction(tx) } };
           if (status.status !== 'UNKNOWN' && status.status !== tx.status) {
-            const updated = await posStorage.updateTransaction(merchantTxnId, { status: status.status, rrn: status.rrn || null, payment_method: status.paymentMethod || null, error_code: status.status === 'FAILED' ? status.resultCode : null, error_message: status.status === 'FAILED' ? status.resultMsg : null, completed_at: ['SUCCESS', 'FAILED', 'EXPIRED'].includes(status.status) ? new Date().toISOString() : null }, user.id);
+            const updated = await posStorage.updateTransaction(merchantTxnId, { status: status.status, settlement_status: status.status === 'SUCCESS' ? 'SETTLEMENT_PENDING' : tx.settlement_status, rrn: status.rrn || null, payment_method: status.paymentMethod || null, error_code: status.status === 'FAILED' ? status.resultCode : null, error_message: status.status === 'FAILED' ? status.resultMsg : null, completed_at: ['SUCCESS', 'FAILED', 'EXPIRED'].includes(status.status) ? new Date().toISOString() : null }, user.id);
             return { status: 200, body: { ok: true, updated: true, transaction: sanitizeTransaction(updated) } };
           }
         }
@@ -256,18 +269,18 @@ export async function handlePOSRequest(req, action, body = {}, providerName = 'p
       }
       if (action === 'sync' || action === 'reconcile') {
         if (method !== 'POST') return { status: 405, body: { error: 'METHOD_NOT_ALLOWED' } };
-        if (!provider.isConfigured()) return { status: 503, body: { ok: false, error: 'PHONEPE_CREDENTIALS_REQUIRED', ...integration } };
         const terminal = await posStorage.getTerminal(user.id, 'phonepe');
         if (!terminal) return { status: 400, body: { error: 'TERMINAL_NOT_CONFIGURED' } };
+        if (!provider.isConfigured({ storeId: terminal.store_id, environment: terminal.environment })) return { status: 503, body: { ok: false, error: 'PHONEPE_PRODUCTION_ACTIVATION_OR_CREDENTIALS_REQUIRED', ...provider.getIntegrationStatus({ storeId: terminal.store_id, environment: terminal.environment }) } };
         const pending = (await posStorage.getPendingTransactions({ userId: user.id, limit: 50 })).filter((tx) => tx.provider === 'phonepe');
         let updatedCount = 0;
         for (const tx of pending) {
           try {
-            const status = await provider.searchTransaction({ mid: tx.mid, tid: tx.tid, merchantTxnId: tx.merchant_txn_id });
+            const status = await provider.searchTransaction({ mid: tx.mid, tid: tx.tid, storeId: terminal.store_id, merchantTxnId: tx.merchant_txn_id, environment: tx.environment });
             if (!status || status.status === 'UNKNOWN') continue;
             if (status.amountPaise !== Number(tx.amount_paise)) continue;
             if (status.status !== tx.status) {
-              await posStorage.updateTransaction(tx.merchant_txn_id, { status: status.status, rrn: status.rrn || null, payment_method: status.paymentMethod || null, error_code: status.status === 'FAILED' ? status.resultCode : null, completed_at: ['SUCCESS', 'FAILED', 'EXPIRED'].includes(status.status) ? new Date().toISOString() : null }, user.id);
+              await posStorage.updateTransaction(tx.merchant_txn_id, { status: status.status, settlement_status: status.status === 'SUCCESS' ? 'SETTLEMENT_PENDING' : tx.settlement_status, rrn: status.rrn || null, payment_method: status.paymentMethod || null, error_code: status.status === 'FAILED' ? status.resultCode : null, completed_at: ['SUCCESS', 'FAILED', 'EXPIRED'].includes(status.status) ? new Date().toISOString() : null }, user.id);
               updatedCount++;
             }
           } catch { /* retain pending state; a later reconciliation can retry */ }
@@ -284,6 +297,17 @@ export async function handlePOSRequest(req, action, body = {}, providerName = 'p
       console.error(`[pos-controller] PhonePe ${action} failed:`, error.code || 'UNEXPECTED_ERROR');
       return { status: 500, body: { ok: false, error: 'INTERNAL_ERROR', message: 'PhonePe POS request failed.' } };
     }
+  }
+
+  if (action === 'terminals' && method === 'GET') {
+    try { return { status: 200, body: { terminals: (await posStorage.listTerminals(user.id)).filter((terminal) => terminal.provider === providerName).map(sanitizeTerminal) } }; }
+    catch { return { status: 503, body: { error: 'POS_DATABASE_UNAVAILABLE' } }; }
+  }
+  if (action === 'terminal-disable' && method === 'POST') {
+    try {
+      const terminal = await posStorage.disableTerminal(user.id, String(body.terminalId || ''), providerName);
+      return terminal ? { status: 200, body: { terminal } } : { status: 404, body: { error: 'TERMINAL_NOT_FOUND' } };
+    } catch { return { status: 503, body: { error: 'POS_DATABASE_UNAVAILABLE' } }; }
   }
 
   try {
@@ -450,6 +474,9 @@ export async function handlePOSRequest(req, action, body = {}, providerName = 'p
             },
           };
         }
+        if (resolved.environment === 'production' && process.env.PAYTM_POS_PRODUCTION_APPROVED !== 'true') {
+          return { status:503, body:{ error:'PAYTM_PRODUCTION_ACTIVATION_REQUIRED', message:'Paytm production POS requests are blocked until server-side merchant onboarding, provider permissions, UAT evidence, and internal approval are recorded.' } };
+        }
 
         const merchantTxnId = `RP_${Date.now()}_${randomUUID().slice(0, 6).toUpperCase()}`;
 
@@ -489,12 +516,14 @@ export async function handlePOSRequest(req, action, body = {}, providerName = 'p
         const updatedTx = await posStorage.updateTransaction(merchantTxnId, {
           cpay_id: initRes.cpayId,
           status: initRes.status,
+          settlement_status: initRes.status === 'SUCCESS' ? 'SETTLEMENT_PENDING' : 'NOT_AVAILABLE',
           error_code: initRes.success ? null : initRes.resultCode,
           error_message: initRes.success ? null : initRes.message,
           metadata: {
             paytmInitiation: { rawStatus: initRes.rawStatus, resultCode: initRes.resultCode },
           },
         });
+        if (['PENDING', 'UNKNOWN', 'SUCCESS'].includes(initRes.status)) await posStorage.enqueueReconciliation({ provider: 'paytm', merchantTxnId });
 
         // 4. Audit log
         await posStorage.recordSyncLog({
@@ -553,6 +582,7 @@ export async function handlePOSRequest(req, action, body = {}, providerName = 'p
             if (statusRes.status && statusRes.status !== tx.status) {
               const updates = {
                 status: statusRes.status,
+                settlement_status: statusRes.status === 'SUCCESS' ? (tx.settlement_status === 'SETTLED' ? 'SETTLED' : 'SETTLEMENT_PENDING') : tx.settlement_status,
                 payment_method: statusRes.paymentMethod || tx.payment_method,
                 rrn: statusRes.rrn || tx.rrn,
                 auth_code: statusRes.authCode || tx.auth_code,
@@ -621,6 +651,7 @@ export async function handlePOSRequest(req, action, body = {}, providerName = 'p
             if (statusRes.status && statusRes.status !== tx.status) {
               await posStorage.updateTransaction(tx.merchant_txn_id, {
                 status: statusRes.status,
+                settlement_status: statusRes.status === 'SUCCESS' ? (tx.settlement_status === 'SETTLED' ? 'SETTLED' : 'SETTLEMENT_PENDING') : tx.settlement_status,
                 payment_method: statusRes.paymentMethod || tx.payment_method,
                 rrn: statusRes.rrn || tx.rrn,
                 auth_code: statusRes.authCode || tx.auth_code,
@@ -788,9 +819,7 @@ export async function handlePhonePeWebhook(req, body = {}) {
     const provider = getPOSProvider('phonepe');
     const response = body?.response;
     const signature = req.headers['x-verify'];
-    if (typeof response !== 'string' || !provider.verifyCallback(response, signature)) {
-      return { status: 401, body: { success: false, message: 'Invalid PhonePe callback signature.' } };
-    }
+    if (typeof response !== 'string') return { status: 401, body: { success: false, message: 'Invalid PhonePe callback signature.' } };
     let decoded;
     try { decoded = JSON.parse(Buffer.from(response, 'base64').toString('utf8')); } catch {
       return { status: 400, body: { success: false, message: 'Malformed PhonePe callback payload.' } };
@@ -799,7 +828,11 @@ export async function handlePhonePeWebhook(req, body = {}) {
     const transactionId = data?.transactionId;
     if (!transactionId) return { status: 400, body: { success: false, message: 'PhonePe callback is missing transactionId.' } };
     const tx = await posStorage.getTransactionByMerchantTxnId(transactionId);
-    if (!tx || tx.provider !== 'phonepe' || data.merchantId !== tx.mid || Number(data.amount) !== Number(tx.amount_paise)
+    if (!tx || tx.provider !== 'phonepe') return { status: 404, body: { success: false, message: 'Callback transaction was not found.' } };
+    if (!provider.verifyCallback(response, signature, { environment: tx.environment })) {
+      return { status: 401, body: { success: false, message: 'Invalid PhonePe callback signature.' } };
+    }
+    if (data.merchantId !== tx.mid || Number(data.amount) !== Number(tx.amount_paise)
       || (data.terminalId && data.terminalId !== tx.tid)
       || (data.storeId && process.env.PHONEPE_POS_STORE_ID && data.storeId !== process.env.PHONEPE_POS_STORE_ID)) {
       return { status: 400, body: { success: false, message: 'Callback transaction, merchant, or amount does not match.' } };
@@ -811,14 +844,18 @@ export async function handlePhonePeWebhook(req, body = {}) {
     const status = ['SUCCESS', 'COMPLETED', 'PAYMENT_SUCCESS'].includes(raw) && decoded.success !== false
       ? 'SUCCESS'
       : ['FAILED', 'PAYMENT_ERROR', 'PAYMENT_DECLINED', 'PAYMENT_CANCELLED'].includes(raw) || decoded.success === false ? 'FAILED' : 'PENDING';
-    await posStorage.updateTransaction(transactionId, {
+    const eventId = createHash('sha256').update(response).digest('hex');
+    const applied = await posStorage.applyWebhookEvent({ provider: 'phonepe', eventId, merchantTxnId: transactionId, fields: {
       status,
+      settlement_status: status === 'SUCCESS' ? 'SETTLEMENT_PENDING' : tx.settlement_status,
       payment_method: data.paymentMode || tx.payment_method,
       rrn: data.referenceNumber || data.providerReferenceId || tx.rrn,
       error_code: status === 'FAILED' ? (data.responseCode || decoded.code) : null,
       error_message: status === 'FAILED' ? decoded.message : null,
       completed_at: ['SUCCESS', 'FAILED'].includes(status) ? new Date().toISOString() : null,
-    });
+    } });
+    if (applied.duplicate) return { status: 200, body: { success: true, message: 'Duplicate terminal callback acknowledged.' } };
+    if (['PENDING', 'SUCCESS'].includes(status)) await posStorage.enqueueReconciliation({ provider: 'phonepe', merchantTxnId: transactionId });
     await posStorage.recordSyncLog({ terminalId: tx.terminal_id, userId: tx.user_id, provider: 'phonepe', action: 'WEBHOOK_UPDATE', status: 'SUCCESS', message: `PhonePe signed callback updated ${transactionId} to ${status}.` });
     return { status: 200, body: { success: true, message: 'Callback processed.' } };
   } catch {
@@ -907,14 +944,19 @@ export async function handleWebhook(req, body = {}) {
     else if (['FAILED', 'TXN_FAILURE', 'EXPIRED'].includes(rawStatus)) status = 'FAILED';
     else if (['CANCELLED', 'VOID'].includes(rawStatus)) status = 'CANCELLED';
 
-    await posStorage.updateTransaction(merchantTxnId, {
+    const eventPayload = typeof payloadToVerify === 'string' ? payloadToVerify : JSON.stringify(payloadToVerify);
+    const eventId = createHash('sha256').update(eventPayload).digest('hex');
+    const applied = await posStorage.applyWebhookEvent({ provider: tx.provider || 'paytm', eventId, merchantTxnId, fields: {
       status,
+      settlement_status: status === 'SUCCESS' ? 'SETTLEMENT_PENDING' : tx.settlement_status,
       payment_method: body?.body?.paymentMode || body?.PAYMENTMODE || tx.payment_method,
       rrn: body?.body?.rrn || body?.RRN || tx.rrn,
       auth_code: body?.body?.authCode || tx.auth_code,
       completed_at: ['SUCCESS', 'FAILED', 'CANCELLED'].includes(status) ? new Date().toISOString() : null,
       metadata: { webhook: { rawStatus } },
-    });
+    } });
+    if (applied.duplicate) return { status: 200, body: { status: 'SUCCESS', message: 'Duplicate webhook event acknowledged.' } };
+    if (['PENDING', 'SUCCESS'].includes(status)) await posStorage.enqueueReconciliation({ provider: tx.provider || 'paytm', merchantTxnId });
 
     await posStorage.recordSyncLog({
       terminalId: tx.terminal_id,

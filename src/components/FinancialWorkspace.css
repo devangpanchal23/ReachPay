@@ -2040,3 +2040,16 @@
 }
 
 .pos-provider-picker{display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:16px}.phonepe-partner-card{padding:24px;margin-top:18px}.phonepe-history-card{padding:24px}.dashboard-notice-content{display:flex;align-items:center;gap:10px}
+.pos-security-notice {
+  margin: 18px 0;
+  padding: 12px 14px;
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  border-radius: 10px;
+  color: #f7d58a;
+  background: rgba(245, 158, 11, 0.08);
+  line-height: 1.5;
+}
+
+.pos-inline-notice { margin: 14px 0 0; color: var(--text-secondary, #aab5c5); }
+.pos-action-row { display: flex; gap: 10px; align-items: center; margin-top: 18px; }
+.pos-action-row button:disabled { opacity: 0.6; cursor: not-allowed; }

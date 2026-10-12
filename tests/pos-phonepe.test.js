@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { getPOSProvider, posProviders } from '../server/pos/provider-registry.js';
 import { PhonePePOSProvider, phonePePOSProvider } from '../server/pos/phonepe-provider.js';
 
-const envKeys = ['PHONEPE_POS_ENV', 'PHONEPE_POS_SALT_KEY', 'PHONEPE_POS_SALT_INDEX', 'PHONEPE_POS_STORE_ID', 'PHONEPE_POS_PROVIDER_ID'];
+const envKeys = ['PHONEPE_POS_ENV','PHONEPE_POS_SALT_KEY','PHONEPE_POS_SALT_INDEX','PHONEPE_POS_STORE_ID','PHONEPE_POS_PROVIDER_ID','PHONEPE_POS_CONTRACT_CONFIRMED','PHONEPE_POS_UAT_SALT_KEY','PHONEPE_POS_UAT_SALT_INDEX','PHONEPE_POS_UAT_PROVIDER_ID','PHONEPE_POS_UAT_CONTRACT_CONFIRMED','PHONEPE_POS_PRODUCTION_SALT_KEY','PHONEPE_POS_PRODUCTION_SALT_INDEX','PHONEPE_POS_PRODUCTION_PROVIDER_ID','PHONEPE_POS_PRODUCTION_CONTRACT_CONFIRMED','PHONEPE_POS_PRODUCTION_APPROVED'];
 function setEnv(values) { for (const key of envKeys) { if (key in values) process.env[key] = values[key]; else delete process.env[key]; } }
 function sha(value) { return createHash('sha256').update(value).digest('hex'); }
 
@@ -23,8 +23,35 @@ test('PhonePe provider reports exactly which merchant credentials and enablement
   assert.match(result.message, /MID\/TID references do not authenticate/);
 });
 
+test('PhonePe API calls require explicit private-contract confirmation', () => {
+  setEnv({ PHONEPE_POS_SALT_KEY: 'test-salt', PHONEPE_POS_SALT_INDEX: '1', PHONEPE_POS_STORE_ID: 'store-1' });
+  assert.equal(phonePePOSProvider.isConfigured(), false);
+  process.env.PHONEPE_POS_CONTRACT_CONFIRMED = 'true';
+  assert.equal(phonePePOSProvider.isConfigured(), true);
+  setEnv({});
+});
+
+test('PhonePe production cannot reuse UAT credentials or activate without server approval', () => {
+  setEnv({ PHONEPE_POS_ENV:'production',PHONEPE_POS_SALT_KEY:'uat-only',PHONEPE_POS_SALT_INDEX:'1',PHONEPE_POS_STORE_ID:'store-1',PHONEPE_POS_CONTRACT_CONFIRMED:'true' });
+  assert.equal(phonePePOSProvider.isConfigured({storeId:'store-1',environment:'production'}),false);
+  assert.equal(phonePePOSProvider.getIntegrationStatus({storeId:'store-1',environment:'production'}).status,'PRODUCTION_ACTIVATION_REQUIRED');
+  setEnv({ PHONEPE_POS_ENV:'production',PHONEPE_POS_PRODUCTION_SALT_KEY:'live-key',PHONEPE_POS_PRODUCTION_SALT_INDEX:'2',PHONEPE_POS_STORE_ID:'store-1',PHONEPE_POS_PRODUCTION_CONTRACT_CONFIRMED:'true',PHONEPE_POS_PRODUCTION_APPROVED:'true' });
+  assert.equal(phonePePOSProvider.isConfigured({storeId:'store-1',environment:'production'}),true);
+  setEnv({});
+});
+
+test('PhonePe signs requests with the selected environment credentials', () => {
+  setEnv({ PHONEPE_POS_UAT_SALT_KEY:'uat-secret',PHONEPE_POS_UAT_SALT_INDEX:'1',PHONEPE_POS_STORE_ID:'store-1',PHONEPE_POS_UAT_CONTRACT_CONFIRMED:'true',PHONEPE_POS_PRODUCTION_SALT_KEY:'production-secret',PHONEPE_POS_PRODUCTION_SALT_INDEX:'9',PHONEPE_POS_PRODUCTION_CONTRACT_CONFIRMED:'true',PHONEPE_POS_PRODUCTION_APPROVED:'true' });
+  const uat=phonePePOSProvider.signature('encoded','/path',{environment:'uat'});
+  const production=phonePePOSProvider.signature('encoded','/path',{environment:'production'});
+  assert.equal(uat,`${sha('encoded/pathuat-secret')}###1`);
+  assert.equal(production,`${sha('encoded/pathproduction-secret')}###9`);
+  assert.notEqual(uat,production);
+  setEnv({});
+});
+
 test('PhonePe EDC sale uses documented endpoint, payload and X-VERIFY construction', async () => {
-  setEnv({ PHONEPE_POS_ENV: 'uat', PHONEPE_POS_SALT_KEY: 'test-salt', PHONEPE_POS_SALT_INDEX: '1', PHONEPE_POS_STORE_ID: 'store-1' });
+  setEnv({ PHONEPE_POS_ENV: 'uat', PHONEPE_POS_SALT_KEY: 'test-salt', PHONEPE_POS_SALT_INDEX: '1', PHONEPE_POS_STORE_ID: 'store-1', PHONEPE_POS_CONTRACT_CONFIRMED: 'true' });
   let sent;
   const provider = new PhonePePOSProvider({ fetchImpl: async (url, options) => {
     sent = { url, ...options };
@@ -42,19 +69,31 @@ test('PhonePe EDC sale uses documented endpoint, payload and X-VERIFY constructi
 });
 
 test('PhonePe status signature and status mapping match the documented contract', async () => {
-  setEnv({ PHONEPE_POS_ENV: 'production', PHONEPE_POS_SALT_KEY: 'test-salt', PHONEPE_POS_SALT_INDEX: '2', PHONEPE_POS_STORE_ID: 'store-1' });
+  setEnv({ PHONEPE_POS_ENV: 'production', PHONEPE_POS_PRODUCTION_SALT_KEY: 'test-salt', PHONEPE_POS_PRODUCTION_SALT_INDEX: '2', PHONEPE_POS_STORE_ID: 'store-1', PHONEPE_POS_PRODUCTION_CONTRACT_CONFIRMED: 'true', PHONEPE_POS_PRODUCTION_APPROVED: 'true' });
   let sent;
   const provider = new PhonePePOSProvider({ fetchImpl: async (url, options) => {
     sent = { url, ...options };
-    return { ok: true, json: async () => ({ success: true, code: 'SUCCESS', data: { merchantId: 'merchant-1', transactionId: 'txn-1', amount: 1250, status: 'SUCCESS', referenceNumber: 'rrn-1' } }) };
+    return { ok: true, json: async () => ({ success: true, code: 'SUCCESS', data: { merchantId: 'merchant-1', storeId:'store-1', terminalId:'terminal-1', transactionId: 'txn-1', amount: 1250, status: 'SUCCESS', referenceNumber: 'rrn-1' } }) };
   } });
-  const result = await provider.getTransactionStatus({ mid: 'merchant-1', merchantTxnId: 'txn-1' });
+  const result = await provider.getTransactionStatus({ mid: 'merchant-1', tid:'terminal-1', storeId:'store-1', merchantTxnId: 'txn-1' });
   assert.equal(result.status, 'SUCCESS');
   assert.equal(result.amountPaise, 1250);
   assert.equal(result.rrn, 'rrn-1');
   const path = '/v1/edc/transaction/merchant-1/txn-1/status';
   assert.equal(sent.url, `https://mercury-t2.phonepe.com${path}`);
   assert.equal(sent.headers['X-VERIFY'], `${sha(`${path}test-salt`)}###2`);
+});
+
+test('PhonePe status remains UNKNOWN when the terminal identity or amount is incomplete', async () => {
+  setEnv({ PHONEPE_POS_ENV:'uat',PHONEPE_POS_SALT_KEY:'test-salt',PHONEPE_POS_SALT_INDEX:'2',PHONEPE_POS_STORE_ID:'store-1',PHONEPE_POS_CONTRACT_CONFIRMED:'true' });
+  const provider = new PhonePePOSProvider({ fetchImpl: async () => ({
+    ok:true,
+    json:async()=>({success:true,code:'SUCCESS',data:{merchantId:'merchant-1',transactionId:'txn-1',status:'SUCCESS'}}),
+  }) });
+  const result=await provider.getTransactionStatus({mid:'merchant-1',tid:'terminal-1',storeId:'store-1',merchantTxnId:'txn-1'});
+  assert.equal(result.status,'UNKNOWN');
+  assert.equal(result.resultCode,'STATUS_IDENTITY_OR_AMOUNT_MISMATCH');
+  setEnv({});
 });
 
 test('PhonePe callbacks require matching X-VERIFY salt index and digest', () => {
@@ -67,13 +106,13 @@ test('PhonePe callbacks require matching X-VERIFY salt index and digest', () => 
 });
 
 test('PhonePe reconciliation uses documented search request envelope and maps authoritative status', async () => {
-  setEnv({ PHONEPE_POS_ENV: 'uat', PHONEPE_POS_SALT_KEY: 'search-salt', PHONEPE_POS_SALT_INDEX: '3', PHONEPE_POS_STORE_ID: 'store-1' });
+  setEnv({ PHONEPE_POS_ENV: 'uat', PHONEPE_POS_SALT_KEY: 'search-salt', PHONEPE_POS_SALT_INDEX: '3', PHONEPE_POS_STORE_ID: 'store-1', PHONEPE_POS_CONTRACT_CONFIRMED: 'true' });
   let sent;
   const provider = new PhonePePOSProvider({ fetchImpl: async (url, options) => {
     sent = { url, ...options };
-    return { ok: true, json: async () => ({ success: true, code: 'SUCCESS', data: [{ merchantId: 'merchant-1', transactionId: 'txn-1', amount: 1250, status: 'SUCCESS' }] }) };
+    return { ok: true, json: async () => ({ success: true, code: 'SUCCESS', data: [{ merchantId: 'merchant-1', storeId:'store-1', terminalId:'terminal-1', transactionId: 'txn-1', amount: 1250, status: 'SUCCESS' }] }) };
   } });
-  const result = await provider.searchTransaction({ mid: 'merchant-1', tid: 'terminal-1', merchantTxnId: 'txn-1' });
+  const result = await provider.searchTransaction({ mid: 'merchant-1', tid: 'terminal-1', storeId:'store-1', merchantTxnId: 'txn-1' });
   assert.equal(result.status, 'SUCCESS');
   assert.equal(result.amountPaise, 1250);
   assert.equal(sent.url, 'https://mercury-uat.phonepe.com/enterprise-sandbox/v1/edc/transaction/status');

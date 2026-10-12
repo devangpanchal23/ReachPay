@@ -4,6 +4,8 @@ import { handleAuth } from './auth-controller.js';
 import { providerStatus } from './financial/provider.js';
 
 import { handlePOSRequest } from './pos/pos-controller.js';
+import { handleBeneficiaryRequest } from './financial/beneficiaries.js';
+import { handleFinancialOperationsRequest } from './financial/operations.js';
 
 if (process.env.NODE_ENV !== 'production' && !process.env.PUBLIC_SITE_URL) process.env.PUBLIC_SITE_URL = 'http://localhost:5173';
 
@@ -83,6 +85,46 @@ const server = http.createServer(async (req, res) => {
     }
     const result = await handlePOSRequest(req, action, body, provider);
     res.writeHead(result.status, { 'Content-Type': 'application/json; charset=utf-8', ...(result.headers || {}) });
+    return res.end(JSON.stringify(result.body));
+  }
+  if (url.pathname === '/api/banking' || url.pathname.startsWith('/api/banking/')) {
+    if (req.method === 'OPTIONS') { res.writeHead(204); return res.end(); }
+    let body = {};
+    if (['POST', 'PATCH'].includes(req.method)) {
+      try {
+        let raw = '';
+        for await (const chunk of req) {
+          raw += chunk;
+          if (Buffer.byteLength(raw) > 8192) { res.writeHead(413, { 'Content-Type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ error: 'Request is too large.' })); }
+        }
+        if (raw.trim()) body = JSON.parse(raw);
+      } catch {
+        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+        return res.end(JSON.stringify({ error: 'Invalid JSON request.' }));
+      }
+    }
+    const result = await handleBeneficiaryRequest(req, url, body);
+    res.writeHead(result.status, { 'Content-Type': 'application/json; charset=utf-8' });
+    return res.end(JSON.stringify(result.body));
+  }
+  if (url.pathname === '/api/financial' || url.pathname.startsWith('/api/financial/')) {
+    if (req.method === 'OPTIONS') { res.writeHead(204); return res.end(); }
+    let body = {};
+    if (req.method === 'POST') {
+      try {
+        let raw = '';
+        for await (const chunk of req) {
+          raw += chunk;
+          if (Buffer.byteLength(raw) > 16384) { res.writeHead(413, { 'Content-Type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ error: 'Request is too large.' })); }
+        }
+        if (raw.trim()) body = JSON.parse(raw);
+      } catch {
+        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+        return res.end(JSON.stringify({ error: 'Invalid JSON request.' }));
+      }
+    }
+    const result = await handleFinancialOperationsRequest(req, url, body);
+    res.writeHead(result.status, { 'Content-Type': 'application/json; charset=utf-8' });
     return res.end(JSON.stringify(result.body));
   }
   if (url.pathname.startsWith('/api/')) {

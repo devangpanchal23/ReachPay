@@ -32,60 +32,75 @@ export class PhonePePOSProvider {
     });
   }
 
-  getConfig() {
-    const environment = process.env.PHONEPE_POS_ENV || 'uat';
+  getConfig({ environment } = {}) {
+    environment = environment || process.env.PHONEPE_POS_ENV || 'uat';
     const production = environment === 'production';
     return {
       environment,
       baseUrl: production ? 'https://mercury-t2.phonepe.com' : 'https://mercury-uat.phonepe.com/enterprise-sandbox',
-      saltKey: process.env.PHONEPE_POS_SALT_KEY || '',
-      saltIndex: process.env.PHONEPE_POS_SALT_INDEX || '',
-      providerId: process.env.PHONEPE_POS_PROVIDER_ID || '',
+      saltKey: production ? process.env.PHONEPE_POS_PRODUCTION_SALT_KEY || '' : process.env.PHONEPE_POS_UAT_SALT_KEY || process.env.PHONEPE_POS_SALT_KEY || '',
+      saltIndex: production ? process.env.PHONEPE_POS_PRODUCTION_SALT_INDEX || '' : process.env.PHONEPE_POS_UAT_SALT_INDEX || process.env.PHONEPE_POS_SALT_INDEX || '',
+      providerId: production ? process.env.PHONEPE_POS_PRODUCTION_PROVIDER_ID || '' : process.env.PHONEPE_POS_UAT_PROVIDER_ID || process.env.PHONEPE_POS_PROVIDER_ID || '',
       storeId: process.env.PHONEPE_POS_STORE_ID || '',
       callbackUrl: process.env.PHONEPE_POS_CALLBACK_URL || '',
     };
   }
 
-  getIntegrationStatus() {
-    const config = this.getConfig();
-    const configured = Boolean(config.saltKey && config.saltIndex && config.storeId);
-    const status = configured ? 'CONFIGURED_AWAITING_MERCHANT_ENABLEMENT' : 'CREDENTIALS_REQUIRED';
+  getIntegrationStatus({ storeId, environment } = {}) {
+    const config = this.getConfig({ environment });
+    const effectiveStoreId = storeId || config.storeId;
+    const credentialsPresent = Boolean(config.saltKey && config.saltIndex && effectiveStoreId);
+    const contractConfirmed = config.environment === 'production'
+      ? process.env.PHONEPE_POS_PRODUCTION_CONTRACT_CONFIRMED === 'true'
+      : process.env.PHONEPE_POS_UAT_CONTRACT_CONFIRMED === 'true' || process.env.PHONEPE_POS_CONTRACT_CONFIRMED === 'true';
+    const environmentValid = ['uat','staging','production'].includes(config.environment);
+    const productionApproved = config.environment !== 'production' || process.env.PHONEPE_POS_PRODUCTION_APPROVED === 'true';
+    const configured = credentialsPresent && contractConfirmed && environmentValid && productionApproved;
+    const status = !environmentValid ? 'UNSUPPORTED_ENVIRONMENT'
+      : !productionApproved ? 'PRODUCTION_ACTIVATION_REQUIRED'
+        : configured ? 'CONFIGURED_AWAITING_MERCHANT_ENABLEMENT' : 'CREDENTIALS_REQUIRED';
     return {
       provider: this.name, status, connected: false,
       sandboxTestable: configured && config.environment !== 'production',
       environment: config.environment,
       capabilities: this.capabilities,
-      requirements: ['PhonePe-issued EDC salt key and salt index', 'PhonePe-generated Store ID', 'EDC Sale API enabled for merchant', 'Terminal configured in integrated mode', 'Public HTTPS callback URL for event-driven updates'],
+      requirements: ['PhonePe-issued EDC salt key and salt index', 'PhonePe-generated Store ID', 'EDC Sale API enabled for merchant', 'Terminal configured in integrated mode', 'Public HTTPS callback URL for event-driven updates', ...(config.environment === 'production' ? ['Server-side production activation approval after provider UAT and merchant sign-off'] : [])],
       message: configured
         ? 'Credentials are configured. A signed API call is required to verify PhonePe enablement and terminal setup.'
-        : 'PhonePe Integrated EDC is documented, but MID/TID references do not authenticate requests. Configure the PhonePe-issued salt key/index and Store ID on the server, and have PhonePe enable Integrated EDC for this merchant and terminal.',
+        : credentialsPresent
+          ? 'PhonePe credentials are present, but calls remain disabled until the private merchant contract and permissions are confirmed.'
+          : 'PhonePe Integrated EDC is documented, but MID/TID references do not authenticate requests. Configure the PhonePe-issued salt key/index and Store ID on the server, confirm the merchant contract, and have PhonePe enable Integrated EDC for this merchant and terminal.',
     };
   }
 
-  isConfigured() {
-    const c = this.getConfig();
-    return Boolean(c.saltKey && c.saltIndex && c.storeId);
+  isConfigured({ storeId, environment } = {}) {
+    const c = this.getConfig({ environment });
+    const contractConfirmed = c.environment === 'production'
+      ? process.env.PHONEPE_POS_PRODUCTION_CONTRACT_CONFIRMED === 'true'
+      : process.env.PHONEPE_POS_UAT_CONTRACT_CONFIRMED === 'true' || process.env.PHONEPE_POS_CONTRACT_CONFIRMED === 'true';
+    return Boolean(['uat','staging','production'].includes(c.environment) && (c.environment !== 'production' || process.env.PHONEPE_POS_PRODUCTION_APPROVED === 'true')
+      && c.saltKey && c.saltIndex && (storeId || c.storeId) && contractConfirmed);
   }
 
-  signature(payload, path) {
-    const c = this.getConfig();
+  signature(payload, path, { environment } = {}) {
+    const c = this.getConfig({ environment });
     if (!c.saltKey || !c.saltIndex) throw new Error('PHONEPE_CREDENTIALS_REQUIRED');
     const value = payload == null ? '' : (typeof payload === 'string' ? payload : Buffer.from(JSON.stringify(payload)).toString('base64'));
     return `${sha256(`${value}${path}${c.saltKey}`)}###${c.saltIndex}`;
   }
 
-  verifyCallback(response, signature) {
-    const c = this.getConfig();
+  verifyCallback(response, signature, { environment } = {}) {
+    const c = this.getConfig({ environment });
     if (!c.saltKey || !c.saltIndex || typeof response !== 'string' || typeof signature !== 'string') return false;
     const [digest, index] = signature.split('###');
     return index === c.saltIndex && constantTimeEqual(digest, sha256(`${response}${c.saltKey}`));
   }
 
-  async request(path, { payload, callbackUrl } = {}) {
-    const c = this.getConfig();
-    if (!this.isConfigured()) throw new Error('PHONEPE_CREDENTIALS_REQUIRED');
+  async request(path, { payload, callbackUrl, storeId, environment } = {}) {
+    const c = this.getConfig({ environment });
+    if (!this.isConfigured({ storeId, environment })) throw new Error(c.environment === 'production' ? 'PHONEPE_PRODUCTION_ACTIVATION_REQUIRED' : 'PHONEPE_CREDENTIALS_REQUIRED');
     const encoded = payload == null ? null : Buffer.from(JSON.stringify(payload)).toString('base64');
-    const headers = { 'Content-Type': 'application/json', 'X-VERIFY': this.signature(encoded, path) };
+    const headers = { 'Content-Type': 'application/json', 'X-VERIFY': this.signature(encoded, path, { environment }) };
     if (c.providerId) headers['X-PROVIDER-ID'] = c.providerId;
     if (callbackUrl || c.callbackUrl) headers['X-CALLBACK-URL'] = callbackUrl || c.callbackUrl;
     const controller = new AbortController();
@@ -103,48 +118,55 @@ export class PhonePePOSProvider {
     } finally { clearTimeout(timeout); }
   }
 
-  async testConnection({ mid, tid }) {
-    if (!this.isConfigured()) return this.getIntegrationStatus();
-    const result = await this.getTransactionStatus({ mid, merchantTxnId: `RP_HEALTH_${Date.now()}` });
+  async testConnection({ mid, tid, storeId, environment }) {
+    if (!this.isConfigured({ storeId, environment })) return this.getIntegrationStatus({ storeId, environment });
+    const result = await this.getTransactionStatus({ mid, tid, merchantTxnId: `RP_HEALTH_${Date.now()}`, storeId, environment });
     const authenticated = ['SUCCESS', 'INVALID_TRANSACTION_ID'].includes(result.resultCode);
-    return { provider: this.name, connected: authenticated, status: authenticated ? 'API_AUTHENTICATED' : 'CONNECTION_FAILED', message: authenticated ? 'PhonePe authenticated status API responded. This does not prove the terminal has Integrated EDC enabled.' : 'PhonePe status API authentication or merchant configuration failed.', details: { environment: this.getConfig().environment, terminalId: tid, result: result.resultCode } };
+    return { provider: this.name, connected: authenticated, status: authenticated ? 'API_AUTHENTICATED' : 'CONNECTION_FAILED', message: authenticated ? 'PhonePe authenticated status API responded. This does not prove the terminal has Integrated EDC enabled.' : 'PhonePe status API authentication or merchant configuration failed.', details: { environment: this.getConfig({ environment }).environment, terminalId: tid, result: result.resultCode } };
   }
 
-  async initiateSale({ mid, tid, merchantTxnId, amountPaise, orderId = merchantTxnId, paymentModes = ['CARD', 'DQR'], callbackUrl }) {
-    const c = this.getConfig();
+  async initiateSale({ mid, tid, storeId, environment, merchantTxnId, amountPaise, orderId = merchantTxnId, paymentModes = ['CARD', 'DQR'], callbackUrl }) {
+    const c = this.getConfig({ environment });
+    const effectiveStoreId = storeId || c.storeId;
     const payload = {
-      merchantId: mid, storeId: c.storeId, orderId, terminalId: tid,
+      merchantId: mid, storeId: effectiveStoreId, orderId, terminalId: tid,
       transactionId: merchantTxnId, amount: amountPaise, paymentModes,
       timeAllowedForHandoverToTerminalSeconds: 60,
       integrationMappingType: 'ONE_TO_ONE',
     };
-    const result = await this.request(PATHS.init, { payload, callbackUrl });
+    const result = await this.request(PATHS.init, { payload, callbackUrl, storeId: effectiveStoreId, environment });
     if (!result.httpOk || result.success !== true || result.code !== 'SUCCESS' || result.data?.transactionId !== merchantTxnId) {
       return { success: false, status: !result.httpOk || result.code === 'DUPLICATE_TRANSACTION_ID' ? 'UNKNOWN' : 'FAILED', resultCode: result.code || 'UPSTREAM_ERROR', message: result.message || 'PhonePe did not accept the POS request.' };
     }
-    return { success: true, status: 'PENDING', cpayId: merchantTxnId, rawStatus: result.code, resultCode: result.code, message: result.message || 'Payment request sent to PhonePe EDC terminal.' };
+    return { success: true, status: 'PENDING', cpayId: merchantTxnId, rawStatus: result.code, resultCode: result.code, message: 'Payment request was accepted by PhonePe EDC.' };
   }
 
-  async getTransactionStatus({ mid, merchantTxnId }) {
+  async getTransactionStatus({ mid, tid, merchantTxnId, storeId, environment }) {
     const path = PATHS.status(mid, merchantTxnId);
-    const result = await this.request(path);
+    const result = await this.request(path, { storeId, environment });
     if (!result.httpOk || result.success !== true || !result.data || result.data.merchantId !== mid || result.data.transactionId !== merchantTxnId) {
       return { status: 'UNKNOWN', resultCode: result.code || 'INVALID_STATUS_RESPONSE', resultMsg: 'PhonePe status response could not be verified.' };
     }
     const data = result.data;
+    if (!tid || !storeId || data.storeId !== storeId || data.terminalId !== tid
+      || data.amount == null || !Number.isSafeInteger(Number(data.amount))) {
+      return { status: 'UNKNOWN', resultCode: 'STATUS_IDENTITY_OR_AMOUNT_MISMATCH', resultMsg: 'PhonePe status response did not match the configured store, terminal, and amount fields.' };
+    }
     const state = String(data.status || '').toUpperCase();
     const mapped = ({ SUCCESS: 'SUCCESS', FAILED: 'FAILED', EXPIRED: 'EXPIRED', PENDING: 'PENDING' })[state] || 'UNKNOWN';
-    return { status: mapped, resultCode: data.responseCode || result.code, resultMsg: result.message, rrn: data.referenceNumber, paymentMethod: data.paymentMode, rawStatus: state, amountPaise: Number(data.amount), merchantId: data.merchantId, transactionId: data.transactionId };
+    return { status: mapped, resultCode: data.responseCode || result.code, resultMsg: mapped === 'FAILED' ? 'PhonePe reported a failed POS transaction.' : 'PhonePe transaction status was retrieved.', rrn: data.referenceNumber, paymentMethod: data.paymentMode, rawStatus: state, amountPaise: Number(data.amount), merchantId: data.merchantId, storeId: data.storeId, terminalId: data.terminalId, transactionId: data.transactionId };
   }
 
-  async searchTransaction({ mid, tid, merchantTxnId }) {
+  async searchTransaction({ mid, tid, storeId, merchantTxnId, environment }) {
     const path = '/v1/edc/transaction/status';
-    const result = await this.request(path, { payload: { merchantId: mid, terminalId: tid, merchantTransactionId: merchantTxnId } });
-    const data = Array.isArray(result.data) ? result.data.find((item) => item.merchantId === mid && item.transactionId === merchantTxnId) : null;
+    const result = await this.request(path, { payload: { merchantId: mid, terminalId: tid, merchantTransactionId: merchantTxnId }, environment });
+    const data = Array.isArray(result.data) ? result.data.find((item) => item.merchantId === mid && item.terminalId === tid && item.storeId === storeId && item.transactionId === merchantTxnId) : null;
     if (!result.httpOk || result.success !== true || !data) return null;
+    if (data.amount == null || !Number.isSafeInteger(Number(data.amount))) return null;
     return {
       status: ({ SUCCESS: 'SUCCESS', FAILED: 'FAILED', EXPIRED: 'EXPIRED', PENDING: 'PENDING' })[String(data.status).toUpperCase()] || 'UNKNOWN',
       amountPaise: Number(data.amount), rrn: data.referenceNumber, paymentMethod: data.paymentMode,
+      merchantId: data.merchantId, storeId: data.storeId, terminalId: data.terminalId, transactionId: data.transactionId,
       resultCode: data.responseCode, rawStatus: data.status,
     };
   }

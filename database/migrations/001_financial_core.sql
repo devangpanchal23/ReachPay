@@ -1,3 +1,9 @@
+-- DISABLED LEGACY DRAFT. Do not apply this migration: ReachPay must not create
+-- an independent customer wallet. Kept only for historical design reference.
+BEGIN;
+DO $$ BEGIN
+  RAISE EXCEPTION '001_financial_core.sql is disabled: independent ReachPay wallet creation is prohibited.';
+END $$;
 -- ReachPay financial foundation. Requires server/auth-migration.sql first.
 -- Ledger entries use signed integer paise; entries are append-only and every
 -- journal must net to zero before the containing transaction can commit.
