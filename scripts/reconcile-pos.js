@@ -6,8 +6,8 @@ import { runReconciliationBatch } from '../server/pos/pos-reconciliation.js';
 if (!process.env.DATABASE_URL) {
   process.stderr.write('[ReachPay POS] DATABASE_URL is required for durable reconciliation.\n');
   process.exitCode = 1;
-} else if (!['reachpay_dev', 'reachpay_test'].includes(new URL(process.env.DATABASE_URL).pathname.replace(/^\//, ''))) {
-  process.stderr.write('[ReachPay POS] Refusing reconciliation outside reachpay_dev or reachpay_test.\n');
+} else if (!['reachpay', 'reachpay_dev', 'reachpay_test'].includes(new URL(process.env.DATABASE_URL).pathname.replace(/^\//, ''))) {
+  process.stderr.write('[ReachPay POS] Refusing reconciliation outside reachpay, reachpay_dev or reachpay_test.\n');
   process.exitCode = 1;
 } else {
   try {

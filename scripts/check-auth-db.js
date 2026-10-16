@@ -13,8 +13,8 @@ const requiredTables = [
 if (!process.env.DATABASE_URL) {
   console.error('DATABASE_URL is missing. Add your PostgreSQL connection string to .env.');
   process.exitCode = 1;
-} else if (!['reachpay_dev', 'reachpay_test'].includes(new URL(process.env.DATABASE_URL).pathname.replace(/^\//, ''))) {
-  console.error('Refusing to inspect any database except reachpay_dev or reachpay_test.');
+} else if (!['reachpay', 'reachpay_dev', 'reachpay_test'].includes(new URL(process.env.DATABASE_URL).pathname.replace(/^\//, ''))) {
+  console.error('Refusing to inspect any database except reachpay, reachpay_dev or reachpay_test.');
   process.exitCode = 1;
 } else {
   const pool = new pg.Pool({

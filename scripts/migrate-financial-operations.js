@@ -6,8 +6,8 @@ const urlText = process.env.DATABASE_URL;
 if (!urlText) throw new Error('DATABASE_URL is required.');
 const url = new URL(urlText);
 const databaseName = url.pathname.replace(/^\//, '');
-if (!['reachpay_dev', 'reachpay_test'].includes(databaseName)) {
-  throw new Error('Refusing to migrate any database except reachpay_dev or reachpay_test.');
+if (!['reachpay', 'reachpay_dev', 'reachpay_test'].includes(databaseName)) {
+  throw new Error('Refusing to migrate any database except reachpay, reachpay_dev or reachpay_test.');
 }
 
 const { Pool } = await import('pg');

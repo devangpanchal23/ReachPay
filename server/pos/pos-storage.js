@@ -151,29 +151,48 @@ async function getPool() {
   }
   let database;
   try { database = new URL(dbUrl).pathname.replace(/^\//, ''); }
-  catch { throw storageError(new Error('DATABASE_URL is invalid')); }
-  if (!['reachpay_dev','reachpay_test'].includes(database)) throw storageError(new Error('DATABASE_NOT_ALLOWED'));
+  catch {
+    if (production()) throw storageError(new Error('DATABASE_URL is invalid'));
+    return null;
+  }
+  if (!['reachpay', 'reachpay_dev', 'reachpay_test'].includes(database)) {
+    if (production()) throw storageError(new Error('DATABASE_NOT_ALLOWED'));
+    return null;
+  }
 
   if (!poolPromise) {
-    poolPromise = import('pg')
-      .then(({ Pool }) => {
+    poolPromise = (async () => {
+      try {
+        const { Pool } = await import('pg');
         const p = new Pool({
           connectionString: dbUrl,
           ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: true } : undefined,
           max: 6,
           idleTimeoutMillis: 30_000,
-          connectionTimeoutMillis: 5_000,
+          connectionTimeoutMillis: 3_000,
         });
         p.on('error', (err) => console.warn('[ReachPay POS DB] Pool warning:', err.message));
+        await p.query('SELECT 1');
         return p;
-      })
-      .catch((err) => {
-        throw storageError(err);
-      });
+      } catch (err) {
+        if (production()) throw storageError(err);
+        console.warn('[ReachPay POS DB] PostgreSQL unavailable, falling back to local store:', err.message);
+        return null;
+      }
+    })();
   }
 
-  const p = await poolPromise;
-  if (!p) throw storageError(new Error('PostgreSQL pool unavailable'));
+  let p;
+  try {
+    p = await poolPromise;
+  } catch (err) {
+    if (production()) throw storageError(err);
+    return null;
+  }
+  if (!p) {
+    if (production()) throw storageError(new Error('PostgreSQL pool unavailable'));
+    return null;
+  }
   if (p && !migrated && production()) {
     migrated = true;
     return p;
@@ -198,7 +217,9 @@ async function getPool() {
       }
       migrated = true;
     } catch (err) {
-      throw storageError(err);
+      if (production()) throw storageError(err);
+      console.warn('[ReachPay POS DB] Schema migration notice, using local store:', err.message);
+      return null;
     }
   }
   return p;
@@ -209,11 +230,12 @@ export const posStorage = {
    * Terminal Management
    */
   async getTerminal(userId = null, provider = 'paytm', match = {}) {
-    const p = await getPool();
+    let p = null;
+    try { p = await getPool(); } catch (err) { if (production()) throw err; }
     if (p) {
       try {
         const { rows } = await p.query(
-      `SELECT id, user_id, provider, environment, mid, tid, client_id,
+      `SELECT id, user_id, provider, environment, mid, tid, client_id, store_id, external_mid, external_tid,
                   encrypted_merchant_key, encrypted_merchant_key_iv, encrypted_merchant_key_tag,
                   status, last_tested_at, last_status_message, created_at, updated_at
            FROM pos_terminals
@@ -227,7 +249,8 @@ export const posStorage = {
         );
         if (rows[0]) return rows[0];
       } catch (err) {
-        throw storageError(err);
+        if (production()) throw storageError(err);
+        console.warn('[ReachPay POS DB] getTerminal query notice:', err.message);
       }
     }
 
@@ -244,12 +267,17 @@ export const posStorage = {
   },
 
   async listTerminals(userId) {
-    const p = await getPool();
+    let p = null;
+    try { p = await getPool(); } catch (err) { if (production()) throw err; }
     if (p) {
-      const { rows } = await p.query(`SELECT id,user_id,provider,environment,mid,tid,client_id,store_id,external_mid,external_tid,
-        provider_verification_status,status,last_tested_at,last_status_message,created_at,updated_at
-        FROM pos_terminals WHERE user_id=$1 ORDER BY updated_at DESC`, [userId]);
-      return rows;
+      try {
+        const { rows } = await p.query(`SELECT id,user_id,provider,environment,mid,tid,client_id,store_id,external_mid,external_tid,
+          provider_verification_status,status,last_tested_at,last_status_message,created_at,updated_at
+          FROM pos_terminals WHERE user_id=$1 ORDER BY updated_at DESC`, [userId]);
+        return rows;
+      } catch (err) {
+        if (production()) throw storageError(err);
+      }
     }
     return loadStore().terminals.filter((terminal) => terminal.user_id === userId).map((terminal) => {
       const safe = { ...terminal };
@@ -261,11 +289,16 @@ export const posStorage = {
   },
 
   async disableTerminal(userId, id, provider) {
-    const p = await getPool();
+    let p = null;
+    try { p = await getPool(); } catch (err) { if (production()) throw err; }
     if (p) {
-      const { rows } = await p.query(`UPDATE pos_terminals SET status='INACTIVE',updated_at=now()
-        WHERE id=$1 AND user_id=$2 AND provider=$3 RETURNING id,status,updated_at`, [id,userId,provider]);
-      return rows[0] || null;
+      try {
+        const { rows } = await p.query(`UPDATE pos_terminals SET status='INACTIVE',updated_at=now()
+          WHERE id=$1 AND user_id=$2 AND provider=$3 RETURNING id,status,updated_at`, [id,userId,provider]);
+        return rows[0] || null;
+      } catch (err) {
+        if (production()) throw storageError(err);
+      }
     }
     const terminal = loadStore().terminals.find((entry) => entry.id === id && entry.user_id === userId && entry.provider === provider);
     if (!terminal) return null;
@@ -275,7 +308,8 @@ export const posStorage = {
 
   async saveTerminal({ userId = null, provider = 'paytm', mid, tid, merchantKey = null, environment = 'staging', clientId = 'reachpay', storeId = null, externalMid = null, externalTid = null }) {
     const { encrypted, iv, tag } = merchantKey ? encryptSecret(merchantKey) : { encrypted: null, iv: null, tag: null };
-    const p = await getPool();
+    let p = null;
+    try { p = await getPool(); } catch (err) { if (production()) throw err; }
     const now = new Date().toISOString();
 
     if (p) {
@@ -309,7 +343,8 @@ export const posStorage = {
         throw conflict;
       } catch (err) {
         if (err.code === 'TERMINAL_OWNERSHIP_CONFLICT') throw err;
-        throw storageError(err);
+        if (production()) throw storageError(err);
+        console.warn('[ReachPay POS DB] saveTerminal query notice, using local store:', err.message);
       }
     }
 
@@ -387,7 +422,8 @@ export const posStorage = {
 
   async updateTerminalStatus(id, { status, message }) {
     const now = new Date().toISOString();
-    const p = await getPool();
+    let p = null;
+    try { p = await getPool(); } catch (err) { if (production()) throw err; }
     if (p) {
       try {
         await p.query(
@@ -397,7 +433,7 @@ export const posStorage = {
           [status, message, id]
         );
       } catch (err) {
-        throw storageError(err);
+        if (production()) throw storageError(err);
       }
     }
 
@@ -416,7 +452,8 @@ export const posStorage = {
    * Transactions Management
    */
   async createTransaction(txData) {
-    const p = await getPool();
+    let p = null;
+    try { p = await getPool(); } catch (err) { if (production()) throw err; }
     const now = new Date().toISOString();
 
     const safeMeta = sanitizeSensitiveData(txData.metadata || {});
@@ -465,7 +502,8 @@ export const posStorage = {
         }
       } catch (err) {
         if (err.code === 'IDEMPOTENCY_KEY_CONFLICT') throw err;
-        throw storageError(err);
+        if (production()) throw storageError(err);
+        console.warn('[ReachPay POS DB] createTransaction query notice, using local store:', err.message);
       }
     }
 
@@ -533,7 +571,8 @@ export const posStorage = {
   },
 
   async getTransactionByMerchantTxnId(merchantTxnId, userId = null) {
-    const p = await getPool();
+    let p = null;
+    try { p = await getPool(); } catch (err) { if (production()) throw err; }
     if (p) {
       try {
         const { rows } = await p.query(
@@ -545,7 +584,7 @@ export const posStorage = {
         );
         if (rows[0]) return rows[0];
       } catch (err) {
-        throw storageError(err);
+        if (production()) throw storageError(err);
       }
     }
     const store = loadStore();
@@ -558,7 +597,8 @@ export const posStorage = {
 
   async getTransactionByIdempotencyKey(key, userId = null) {
     if (!key) return null;
-    const p = await getPool();
+    let p = null;
+    try { p = await getPool(); } catch (err) { if (production()) throw err; }
     if (p) {
       try {
         const { rows } = await p.query(
@@ -570,8 +610,7 @@ export const posStorage = {
         );
         if (rows[0]) return rows[0];
       } catch (err) {
-        throw storageError(err);
-        // Fallback
+        if (production()) throw storageError(err);
       }
     }
     const store = loadStore();
@@ -580,7 +619,8 @@ export const posStorage = {
 
   async updateTransaction(merchantTxnId, fields, userId = null) {
     const now = new Date().toISOString();
-    const p = await getPool();
+    let p = null;
+    try { p = await getPool(); } catch (err) { if (production()) throw err; }
     const safeFields = { ...fields };
     if (safeFields.metadata) safeFields.metadata = sanitizeSensitiveData(safeFields.metadata);
     if (p) {
@@ -614,7 +654,7 @@ export const posStorage = {
           return rows[0];
         }
       } catch (err) {
-        throw storageError(err);
+        if (production()) throw storageError(err);
       }
     }
 
@@ -634,7 +674,8 @@ export const posStorage = {
    * Pending transactions for batch synchronization
    */
   async getPendingTransactions({ userId = null, limit = 20 } = {}) {
-    const p = await getPool();
+    let p = null;
+    try { p = await getPool(); } catch (err) { if (production()) throw err; }
     if (p) {
       try {
         const { rows } = await p.query(
@@ -647,7 +688,7 @@ export const posStorage = {
         );
         return rows;
       } catch (err) {
-        throw storageError(err);
+        if (production()) throw storageError(err);
       }
     }
 
@@ -662,14 +703,19 @@ export const posStorage = {
   },
 
   async getSettlementPendingTransactions({ limit = 20 } = {}) {
-    const p = await getPool();
+    let p = null;
+    try { p = await getPool(); } catch (err) { if (production()) throw err; }
     if (p) {
-      const { rows } = await p.query(
-        `SELECT * FROM pos_transactions WHERE status = 'SUCCESS'
-         AND settlement_status IN ('SETTLEMENT_PENDING', 'NOT_AVAILABLE')
-         ORDER BY initiated_at ASC LIMIT $1`, [limit]
-      );
-      return rows;
+      try {
+        const { rows } = await p.query(
+          `SELECT * FROM pos_transactions WHERE status = 'SUCCESS'
+           AND settlement_status IN ('SETTLEMENT_PENDING', 'NOT_AVAILABLE')
+           ORDER BY initiated_at ASC LIMIT $1`, [limit]
+        );
+        return rows;
+      } catch (err) {
+        if (production()) throw storageError(err);
+      }
     }
     return loadStore().transactions
       .filter((t) => t.status === 'SUCCESS' && ['SETTLEMENT_PENDING', 'NOT_AVAILABLE'].includes(t.settlement_status))
@@ -680,7 +726,8 @@ export const posStorage = {
    * List transactions with tenant isolation
    */
   async listTransactions({ userId = null, limit = 30, offset = 0, status = null, terminalId = null } = {}) {
-    const p = await getPool();
+    let p = null;
+    try { p = await getPool(); } catch (err) { if (production()) throw err; }
     if (p) {
       try {
         const { rows } = await p.query(
@@ -698,7 +745,7 @@ export const posStorage = {
         );
         return rows;
       } catch (err) {
-        throw storageError(err);
+        if (production()) throw storageError(err);
       }
     }
 

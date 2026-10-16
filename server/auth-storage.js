@@ -42,6 +42,7 @@ function createEmptyStore() {
     phoneChallenges: [],
     rateLimits: {},
     auditEvents: [],
+    rbacAuditEvents: [],
   };
 }
 
@@ -100,6 +101,8 @@ export const localAuthDb = {
       mobile_verified_at: autoVerify ? now : null,
       verification_messages_consent_at: now,
       status: autoVerify ? 'ACTIVE' : 'PENDING_VERIFICATION',
+      role: 'limited',
+      access_status: 'limited',
       created_at: now,
       updated_at: now,
     };
@@ -115,6 +118,68 @@ export const localAuthDb = {
     Object.assign(user, fields, { updated_at: new Date().toISOString() });
     saveStore();
     return user;
+  },
+
+  async promoteConfiguredOwner(id) {
+    const email = String(process.env.OWNER_EMAIL || '').trim().toLowerCase();
+    if (!email) return false;
+    const store = loadStore();
+    if (store.accounts.some((u) => u.role === 'owner')) return false;
+    const user = store.accounts.find((u) => u.id === id && u.email?.trim().toLowerCase() === email && u.email_verified_at && u.status === 'ACTIVE');
+    if (!user) return false;
+    user.role = 'owner'; user.access_status = 'approved'; user.updated_at = new Date().toISOString(); saveStore();
+    return true;
+  },
+
+  async addMember({ name, email, passwordHash, passwordSalt }) {
+    const store = loadStore();
+    if (store.accounts.some((u) => u.email?.trim().toLowerCase() === email)) return null;
+    const now = new Date().toISOString();
+    const user = { id: randomUUID(), name, email, mobile_e164: null, password_hash: passwordHash, password_salt: passwordSalt,
+      email_verified_at: now, mobile_verified_at: null, verification_messages_consent_at: now, status: 'ACTIVE', role: 'limited',
+      access_status: 'pending', created_at: now, updated_at: now };
+    store.accounts.push(user);
+    saveStore();
+    return user;
+  },
+
+  async listMembers() {
+    return loadStore().accounts.filter((u) => u.role !== 'owner' && ['pending', 'approved', 'revoked'].includes(u.access_status)).map(({ id, name, email, role, access_status, created_at }) => ({ id, name, email, role: role || 'limited', status: access_status, created_at }));
+  },
+
+  async updateMember(id, role, status) {
+    const store = loadStore();
+    const user = store.accounts.find((u) => u.id === id && u.role !== 'owner' && ['pending', 'approved', 'revoked'].includes(u.access_status));
+    if (!user) return null;
+    user.role = role;
+    user.access_status = status;
+    user.updated_at = new Date().toISOString();
+    saveStore();
+    return user;
+  },
+
+  async removeMember(id) {
+    const store = loadStore();
+    const user = store.accounts.find((u) => u.id === id && u.role !== 'owner' && ['pending', 'approved', 'revoked'].includes(u.access_status));
+    if (!user) return null;
+    store.accounts = store.accounts.filter((u) => u.id !== id);
+    store.sessions = store.sessions.filter((s) => s.user_id !== id);
+    saveStore();
+    return user;
+  },
+
+  async revokeMemberSessions(id) {
+    const store = loadStore();
+    store.sessions = store.sessions.filter((session) => session.user_id !== id);
+    saveStore();
+  },
+
+  async recordRbacAudit(actorUserId, targetUserId, eventType, requestId, targetEmail = null) {
+    const store = loadStore();
+    store.rbacAuditEvents ||= [];
+    store.rbacAuditEvents.push({ actor_user_id: actorUserId, target_user_id: targetUserId, target_email: targetEmail, event_type: eventType, request_id: requestId || null, created_at: new Date().toISOString() });
+    if (store.rbacAuditEvents.length > 1000) store.rbacAuditEvents = store.rbacAuditEvents.slice(-1000);
+    saveStore();
   },
 
   async createSession(userId, existingToken = null) {
@@ -145,7 +210,8 @@ export const localAuthDb = {
     const session = store.sessions.find((s) => s.token_hash === tokenHash && new Date(s.expires_at) > new Date());
     if (!session) return null;
     session.last_seen_at = new Date().toISOString();
-    return store.accounts.find((u) => u.id === session.user_id) || null;
+    const user = store.accounts.find((u) => u.id === session.user_id) || null;
+    return user ? { ...user, role: user.role || 'limited', access_status: user.access_status || 'limited' } : null;
   },
 
   async deleteSession(token) {

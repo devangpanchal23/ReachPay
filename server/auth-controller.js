@@ -1,8 +1,9 @@
 import process from 'node:process';
 import { randomUUID, createHmac } from 'node:crypto';
-import { clearSessionCookie, hashOtp, hashPassword, hashToken, newEmailOtp, newSessionToken, normalizeMobile, parseCookies, safeEqualHex, sessionCookie, validateRegistration, verifyPassword } from './auth-core.js';
+import { clearSessionCookie, hashOtp, hashPassword, hashToken, newEmailOtp, newSessionToken, normalizeEmail, normalizeMobile, parseCookies, safeEqualHex, sessionCookie, validateRegistration, verifyPassword } from './auth-core.js';
 import { checkPhoneOtp, sendPhoneOtp } from './sms/twilio-verify.js';
 import { localAuthDb } from './auth-storage.js';
+import { canManageTeam, hasCompletedLoginVerification, memberTransition, resolveEffectiveRole } from './rbac-policy.js';
 
 const DEV_FALLBACK_SECRET = 'reachpay_development_auth_secret_key_at_least_32_bytes_long_fallback';
 
@@ -15,23 +16,74 @@ const requiresPostgres = () => isProduction() || process.env.AUTH_REQUIRE_POSTGR
 
 let poolPromise;
 let migrationPromise;
+let poolAvailable = null;
 
 async function autoMigrate(p) {
   if (isProduction()) return;
+  let migrationLock;
   try {
+    migrationLock = await p.connect();
+    await migrationLock.query("SELECT pg_advisory_lock(hashtext('reachpay.schema.auto_migrate'))");
     const fs = await import('node:fs');
     const path = await import('node:path');
     const { fileURLToPath } = await import('node:url');
     const dirname = path.dirname(fileURLToPath(import.meta.url));
-    const authSqlPath = path.join(dirname, 'auth-migration.sql');
-    if (fs.existsSync(authSqlPath)) {
-      const sql = fs.readFileSync(authSqlPath, 'utf8');
-      await p.query(sql);
-      console.log('[ReachPay DB] PostgreSQL customer authentication schema verified and ready.');
+    const migrationFiles = [
+      'auth-migration.sql',
+      '../database/migrations/002_rbac.sql',
+      '../database/migrations/003_owner_bootstrap.sql',
+      'pos/pos-migration.sql',
+      'financial/beneficiary-migration.sql',
+      'financial/operations-migration.sql',
+      'financial/service-catalog-migration.sql',
+      'financial/transfer-controls-migration.sql',
+    ];
+    for (const rel of migrationFiles) {
+      const fullPath = path.join(dirname, rel);
+      if (fs.existsSync(fullPath)) {
+        try {
+          const sql = fs.readFileSync(fullPath, 'utf8');
+          if (rel.includes('002_rbac.sql') || rel.includes('003_owner_bootstrap.sql')) {
+            const client = await p.connect();
+            try {
+              await client.query('BEGIN');
+              await client.query("SELECT set_config('reachpay.owner_email', $1, true)", [String(process.env.OWNER_EMAIL || '').trim()]);
+              await client.query(sql);
+              await client.query('COMMIT');
+            } catch (error) {
+              await client.query('ROLLBACK').catch(() => {});
+              throw error;
+            } finally { client.release(); }
+          } else await p.query(sql);
+          console.log(`[ReachPay DB] Schema verified: ${rel}`);
+        } catch (mErr) {
+          console.warn(`[ReachPay DB] Schema migration notice (${rel}):`, mErr.message);
+        }
+      }
     }
   } catch (err) {
     console.warn('[ReachPay DB] Auto-migrate check warning:', err.message);
+  } finally {
+    if (migrationLock) {
+      await migrationLock.query("SELECT pg_advisory_unlock(hashtext('reachpay.schema.auto_migrate'))").catch(() => {});
+      migrationLock.release();
+    }
   }
+}
+
+async function createPool(connectionString) {
+  const { Pool } = await import('pg');
+  const p = new Pool({
+    connectionString,
+    ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: true } : undefined,
+    max: 8,
+    idleTimeoutMillis: 30_000,
+    connectionTimeoutMillis: 3_000,
+  });
+  p.on('error', (err) => {
+    console.error('[ReachPay DB Pool error]:', err.message);
+  });
+  return p;
 }
 
 async function pool() {
@@ -41,29 +93,67 @@ async function pool() {
   if (!isPostgresConfigured()) {
     return null;
   }
+  if (poolAvailable === false && !requiresPostgres()) {
+    return null;
+  }
   let database;
-  try { database = new URL(process.env.DATABASE_URL).pathname.replace(/^\//, ''); }
-  catch { throw new Error('DATABASE_NOT_CONFIGURED'); }
-  if (!['reachpay_dev','reachpay_test'].includes(database)) throw new Error('DATABASE_NOT_ALLOWED');
+  let parsedUrl;
+  try {
+    parsedUrl = new URL(process.env.DATABASE_URL);
+    database = parsedUrl.pathname.replace(/^\//, '');
+  } catch {
+    if (requiresPostgres()) throw new Error('DATABASE_NOT_CONFIGURED');
+    poolAvailable = false;
+    return null;
+  }
+  if (!['reachpay', 'reachpay_dev', 'reachpay_test'].includes(database)) {
+    if (requiresPostgres()) throw new Error('DATABASE_NOT_ALLOWED');
+    console.warn(`[ReachPay DB] Database "${database}" is not in allowlist (reachpay, reachpay_dev, reachpay_test). Using local database store.`);
+    poolAvailable = false;
+    return null;
+  }
   if (!poolPromise) {
-    poolPromise = import('pg').then(({ Pool }) => {
-      const p = new Pool({
-        connectionString: process.env.DATABASE_URL,
-        ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: true } : undefined,
-        max: 8,
-        idleTimeoutMillis: 30_000,
-        connectionTimeoutMillis: 5_000,
-      });
-      p.on('error', (err) => {
-        console.error('[ReachPay DB Pool error]:', err.message);
-      });
-      return p;
-    }).catch((err) => {
-      console.warn('[ReachPay DB] Could not initialize PostgreSQL Pool:', err.message);
-      return null;
-    });
+    poolPromise = (async () => {
+      try {
+        let activeConnString = process.env.DATABASE_URL;
+        let p = await createPool(activeConnString);
+        try {
+          await p.query('SELECT 1');
+          poolAvailable = true;
+          return p;
+        } catch (err) {
+          // If the configured db name was 'reachpay' and it failed because db does not exist, try 'reachpay_dev' if available
+          if (err.code === '3D000' && database === 'reachpay' && !requiresPostgres()) {
+            try {
+              await p.end().catch(() => {});
+              const devUrl = new URL(process.env.DATABASE_URL);
+              devUrl.pathname = '/reachpay_dev';
+              activeConnString = devUrl.toString();
+              p = await createPool(activeConnString);
+              await p.query('SELECT 1');
+              console.log('[ReachPay DB] Connected to PostgreSQL database "reachpay_dev".');
+              poolAvailable = true;
+              return p;
+            } catch {
+              // fallback below
+            }
+          }
+          if (requiresPostgres()) throw err;
+          console.warn(`[ReachPay DB] PostgreSQL connection to "${database}" failed (${err.message}). Using persistent local store.`);
+          poolAvailable = false;
+          await p.end().catch(() => {});
+          return null;
+        }
+      } catch (err) {
+        if (requiresPostgres()) throw err;
+        console.warn('[ReachPay DB] Could not initialize PostgreSQL Pool:', err.message);
+        poolAvailable = false;
+        return null;
+      }
+    })();
   }
   const p = await poolPromise;
+  if (!p) return null;
   if (p && !migrationPromise) {
     migrationPromise = autoMigrate(p);
     await migrationPromise;
@@ -72,7 +162,14 @@ async function pool() {
 }
 
 function genericError(status = 503) {
-  return { status, body: { error: status === 429 ? 'Too many attempts. Wait a little and try again.' : 'We could not complete that request. Check your details or try again later.' } };
+  const error = status === 429
+    ? 'Too many attempts. Wait a little and try again.'
+    : status === 401
+      ? 'Authentication required.'
+      : status === 403
+        ? 'Access forbidden.'
+        : 'We could not complete that request. Check your details or try again later.';
+  return { status, body: { error } };
 }
 
 function authFailureCategory(error) {
@@ -191,12 +288,13 @@ export async function currentUser(req) {
   if (p) {
     try {
       const { rows } = await p.query(
-        `SELECT a.id, a.name, a.email, a.mobile_e164, a.email_verified_at, a.mobile_verified_at, a.status
+        `SELECT a.id, a.name, a.email, a.mobile_e164, a.email_verified_at, a.mobile_verified_at, a.status, a.role, a.access_status,
+                EXISTS (SELECT 1 FROM customer_accounts other WHERE other.role='owner' AND other.id<>a.id) AS has_conflicting_owner
          FROM customer_sessions s JOIN customer_accounts a ON a.id = s.user_id
          WHERE s.token_hash = $1 AND s.expires_at > now()`,
         [hashToken(token)]
       );
-      if (rows[0]) return rows[0];
+      if (rows[0]) return resolveEffectiveRole(rows[0], process.env.OWNER_EMAIL, rows[0].has_conflicting_owner);
     } catch (error) {
       if (requiresPostgres()) throw new Error('DATABASE_UNAVAILABLE', { cause: error });
       // Fallback
@@ -204,8 +302,16 @@ export async function currentUser(req) {
   }
 
   if (requiresPostgres()) return null;
-  const localUser = await localAuthDb.getSessionUser(token);
-  if (localUser) return localUser;
+  let localUser = await localAuthDb.getSessionUser(token);
+  if (localUser?.email_verified_at && localUser.status === 'ACTIVE') {
+    await localAuthDb.promoteConfiguredOwner(localUser.id);
+    localUser = await localAuthDb.getSessionUser(token);
+  }
+  if (localUser) {
+    const store = localAuthDb.getStore();
+    const conflict = store.accounts.some((account) => account.role === 'owner' && account.id !== localUser.id);
+    return resolveEffectiveRole(localUser, process.env.OWNER_EMAIL, conflict);
+  }
 
   if (p) {
     try {
@@ -214,11 +320,12 @@ export async function currentUser(req) {
       const session = store.sessions.find((s) => s.token_hash === tokenHash && new Date(s.expires_at) > new Date());
       if (session) {
         const { rows } = await p.query(
-          `SELECT id, name, email, mobile_e164, email_verified_at, mobile_verified_at, status
+          `SELECT id, name, email, mobile_e164, email_verified_at, mobile_verified_at, status, role, access_status,
+                  EXISTS (SELECT 1 FROM customer_accounts other WHERE other.role='owner' AND other.id<>customer_accounts.id) AS has_conflicting_owner
            FROM customer_accounts WHERE id = $1`,
           [session.user_id]
         );
-        if (rows[0]) return rows[0];
+        if (rows[0]) return resolveEffectiveRole(rows[0], process.env.OWNER_EMAIL, rows[0].has_conflicting_owner);
       }
     } catch {
       // Ignore
@@ -229,7 +336,103 @@ export async function currentUser(req) {
 
 function publicUser(user) {
   if (!user) return null;
-  return { id: user.id, name: user.name, email: user.email, mobile: user.mobile_e164, emailVerified: Boolean(user.email_verified_at), mobileVerified: Boolean(user.mobile_verified_at), status: user.status };
+  return { id: user.id, name: user.name, email: user.email, mobile: user.mobile_e164, emailVerified: Boolean(user.email_verified_at), mobileVerified: Boolean(user.mobile_verified_at), status: user.status, role: user.role || 'limited', accessStatus: user.access_status || 'limited' };
+}
+
+async function promoteVerifiedOwner(db, userId) {
+  const ownerEmail = String(process.env.OWNER_EMAIL || '').trim();
+  if (!ownerEmail) return;
+  await db.query("SELECT pg_advisory_xact_lock(hashtext('reachpay.owner.assignment'))");
+  await db.query(`UPDATE customer_accounts SET role='owner',access_status='approved',updated_at=now()
+    WHERE id=$1 AND lower(btrim(email))=lower(btrim($2)) AND email_verified_at IS NOT NULL AND status='ACTIVE'
+    AND (role='owner' OR NOT EXISTS (SELECT 1 FROM customer_accounts WHERE role='owner'))`, [userId, ownerEmail]);
+}
+
+async function ownerRequest(req) {
+  let user;
+  try { user = await currentUser(req); } catch { return { status: 503, body: { error: 'AUTHENTICATION_STORE_UNAVAILABLE' } }; }
+  if (!user) return genericError(401);
+  if (!canManageTeam(user)) return genericError(403);
+  return { user };
+}
+
+async function teamRequest(req, action, body, requestId) {
+  const auth = await ownerRequest(req);
+  if (auth.status) return auth;
+  const { user } = auth;
+  try { if (!await rateAllowed(`team:${user.id}`, 20, 15)) return genericError(429); }
+  catch { return { status: 503, body: { error: 'RATE_LIMIT_STORE_UNAVAILABLE' } }; }
+  const p = await pool();
+  const id = String(body?.id || '').trim();
+  if (action === 'team') {
+    if (req.method === 'GET') {
+      if (p) {
+        const { rows } = await p.query("SELECT id,name,email,role,access_status AS status,created_at FROM customer_accounts WHERE role <> 'owner' AND access_status IN ('pending','approved','revoked') ORDER BY created_at DESC LIMIT 500");
+        return { status: 200, body: { members: rows } };
+      }
+      return { status: 200, body: { members: await localAuthDb.listMembers() } };
+    }
+    if (req.method !== 'POST') return { status: 405, body: { error: 'METHOD_NOT_ALLOWED' } };
+    const email = normalizeEmail(body?.email);
+    const password = typeof body?.password === 'string' ? body.password : '';
+    if (password.length < 12 || password.length > 128) return { status: 400, body: { error: 'Password must be 12–128 characters.' } };
+    if (!await rateAllowed(`team-add:${user.id}`, 5, 60)) return genericError(429);
+    const passwordRecord = await hashPassword(password);
+    const name = email.split('@')[0].slice(0, 100) || 'Member';
+    let member;
+    if (p) {
+      const { rows } = await p.query(`INSERT INTO customer_accounts(name,email,mobile_e164,password_hash,password_salt,email_verified_at,status,role,access_status)
+        VALUES($1,$2,NULL,$3,$4,now(),'ACTIVE','limited','pending') ON CONFLICT DO NOTHING
+        RETURNING id,name,email,role,access_status AS status,created_at`, [name,email,passwordRecord.hash,passwordRecord.salt]);
+      member = rows[0];
+      if (member) await p.query("INSERT INTO rbac_audit_events(actor_user_id,target_user_id,event_type,request_id) VALUES($1,$2,'MEMBER_ADDED',$3)",[user.id,member.id,requestId]);
+    } else {
+      member = await localAuthDb.addMember({ name,email,passwordHash:passwordRecord.hash,passwordSalt:passwordRecord.salt });
+      if (member) await localAuthDb.recordRbacAudit(user.id,member.id,'MEMBER_ADDED',requestId,email);
+    }
+    if (!member) return { status: 409, body: { error: 'ACCOUNT_ALREADY_EXISTS' } };
+    const safeMember = { id: member.id, name: member.name, email: member.email, role: member.role || 'limited', status: member.status || member.access_status || 'pending', created_at: member.created_at };
+    return { status: 201, body: { member: safeMember } };
+  }
+  if (!id || !/^[0-9a-f-]{36}$/i.test(id)) return { status: 400, body: { error: 'INVALID_MEMBER_ID' } };
+  if (action === 'team-approve' || action === 'team-revoke') {
+    if (req.method !== 'POST') return { status: 405, body: { error: 'METHOD_NOT_ALLOWED' } };
+    if (action === 'team-approve' && !await rateAllowed(`team-approve:${user.id}`, 20, 15)) return genericError(429);
+    if (p) {
+      const transition = memberTransition(action === 'team-approve' ? 'approve' : 'revoke');
+      const { role, status } = transition;
+      const result = await p.query("UPDATE customer_accounts SET role=$2,access_status=$3,updated_at=now() WHERE id=$1 AND role <> 'owner' AND access_status IN ('pending','approved','revoked') RETURNING id",[id,role,status]);
+      if (!result.rowCount) return { status: 404, body: { error: 'MEMBER_NOT_FOUND' } };
+      await p.query('DELETE FROM customer_sessions WHERE user_id=$1',[id]);
+      await p.query('INSERT INTO rbac_audit_events(actor_user_id,target_user_id,event_type,request_id) VALUES($1,$2,$3,$4)',[user.id,id,action === 'team-approve' ? 'MEMBER_APPROVED' : 'MEMBER_REVOKED',requestId]);
+      return { status: 200, body: { ok: true } };
+    }
+    const transition = memberTransition(action === 'team-approve' ? 'approve' : 'revoke');
+    const changed = await localAuthDb.updateMember(id, transition.role, transition.status);
+    if (!changed) return { status: 404, body: { error: 'MEMBER_NOT_FOUND' } };
+    if (action === 'team-revoke') await localAuthDb.revokeMemberSessions(id);
+    await localAuthDb.recordRbacAudit(user.id,id,action === 'team-approve' ? 'MEMBER_APPROVED' : 'MEMBER_REVOKED',requestId,changed.email);
+    return { status: 200, body: { ok: true } };
+  }
+  if (action === 'team-remove') {
+    if (req.method !== 'DELETE' && req.method !== 'POST') return { status: 405, body: { error: 'METHOD_NOT_ALLOWED' } };
+    if (p) {
+      const removed = await withDb(async (db) => {
+        const found = await db.query("SELECT email FROM customer_accounts WHERE id=$1 AND role <> 'owner' AND access_status IN ('pending','approved','revoked') FOR UPDATE", [id]);
+        if (!found.rows[0]) return false;
+        await db.query("INSERT INTO rbac_audit_events(actor_user_id,target_user_id,target_email,event_type,request_id) VALUES($1,$2,$3,'MEMBER_REMOVED',$4)",[user.id,id,found.rows[0].email,requestId]);
+        await db.query("DELETE FROM customer_accounts WHERE id=$1 AND role <> 'owner' AND access_status IN ('pending','approved','revoked')",[id]);
+        return true;
+      });
+      if (!removed) return { status: 404, body: { error: 'MEMBER_NOT_FOUND' } };
+    } else {
+      const removed = await localAuthDb.removeMember(id);
+      if (!removed) return { status: 404, body: { error: 'MEMBER_NOT_FOUND' } };
+      await localAuthDb.recordRbacAudit(user.id,id,'MEMBER_REMOVED',requestId,removed.email);
+    }
+    return { status: 200, body: { ok: true } };
+  }
+  return { status: 404, body: { error: 'ROUTE_NOT_FOUND' } };
 }
 
 async function sendEmailCode(user) {
@@ -271,9 +474,8 @@ async function sendEmailCode(user) {
     }
   }
 
-  // Development / unconfigured SMTP logging
+  // Development verification accepts the fixed local-only code without logging challenge values.
   if (isProduction()) throw new Error('EMAIL_OTP_NOT_CONFIGURED');
-  console.log(`\n======================================================\n[ReachPay Auth] 📩 Verification code for ${user.email}: ${code} (or use dev code: 123456)\n======================================================\n`);
   return 'sent';
 }
 
@@ -304,9 +506,8 @@ async function sendPhoneCode(user) {
     }
   }
 
-  // Development / unconfigured SMS logging
+  // Development verification accepts the fixed local-only code without logging challenge values.
   if (isProduction()) throw new Error('SMS_OTP_NOT_CONFIGURED');
-  console.log(`\n======================================================\n[ReachPay Auth] 📱 SMS verification code for ${user.mobile_e164}: ${code} (or use dev code: 123456)\n======================================================\n`);
   return 'sent';
 }
 
@@ -320,10 +521,10 @@ async function withDb(work) {
     await db.query('COMMIT');
     return result;
   } catch (error) {
-    await db.query('ROLLBACK');
+    try { await db.query('ROLLBACK'); } catch { /* ignore */ }
     throw error;
   } finally {
-    db.release();
+    try { db.release(); } catch { /* ignore */ }
   }
 }
 
@@ -340,7 +541,21 @@ async function signup(req, body, requestId) {
   if (isProduction()) {
     const emailReady = Boolean(process.env.SMTP_HOST && process.env.SMTP_PORT && process.env.SMTP_USER && process.env.SMTP_PASS && process.env.SMTP_FROM_EMAIL && process.env.AUTH_OTP_SECRET?.length >= 32);
     const mobileReady = Boolean(process.env.SMS_PROVIDER === 'twilio-verify' && process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN && process.env.TWILIO_VERIFY_SERVICE_SID);
-    if (!emailReady || !mobileReady) return genericError(503);
+    if (!emailReady || !mobileReady) {
+      console.error(JSON.stringify({
+        level: 'error',
+        event: 'auth.signup_unavailable',
+        requestId,
+        category: 'verification_delivery_not_configured',
+        emailReady,
+        mobileReady,
+      }));
+      return {
+        status: 503,
+        body: { error: 'Account creation is temporarily unavailable. Please contact ReachPay support.' },
+        headers: { 'X-Request-Id': requestId },
+      };
+    }
   }
 
   const password = await hashPassword(input.password);
@@ -390,7 +605,11 @@ async function signup(req, body, requestId) {
     }
   }
 
-  if (!p || !created) {
+  if (p && !created) {
+    return { status: 202, body: { ok: true, message: 'If an account can be created, verification instructions will be sent. If you already registered, sign in.' } };
+  }
+
+  if (!created) {
     if (requiresPostgres()) throw new Error('DATABASE_UNAVAILABLE');
     const existing = await localAuthDb.findUserByEmailOrMobile(input.email, input.mobile);
     if (existing) {
@@ -485,7 +704,8 @@ async function login(req, body, requestId) {
     try {
       // Resilient SQL query supporting email OR mobile (E.164, 10 digits, +91 prefix)
       const { rows } = await p.query(
-        `SELECT id, name, email, mobile_e164, password_hash, password_salt, email_verified_at, mobile_verified_at, status
+        `SELECT id, name, email, mobile_e164, password_hash, password_salt, email_verified_at, mobile_verified_at, status, role, access_status,
+                EXISTS (SELECT 1 FROM customer_accounts other WHERE other.role='owner' AND other.id<>customer_accounts.id) AS has_conflicting_owner
          FROM customer_accounts
          WHERE (
            ($1::text IS NOT NULL AND LOWER(email) = LOWER($1))
@@ -518,6 +738,8 @@ async function login(req, body, requestId) {
         if (!passwordMatches) {
           return { status: 401, body: { error: 'Incorrect email/mobile number or password. Please check your credentials.' } };
         }
+        await withDb(async (db) => promoteVerifiedOwner(db, user.id));
+        user = resolveEffectiveRole(user, process.env.OWNER_EMAIL, user.has_conflicting_owner);
         token = await withDb(async (db) => {
           const session = await issueSession(db, user.id);
           await audit(db, user.id, 'LOGIN_SUCCEEDED', requestId);
@@ -542,11 +764,15 @@ async function login(req, body, requestId) {
     if (!passwordMatches) {
       return { status: 401, body: { error: 'Incorrect email/mobile number or password. Please check your credentials.' } };
     }
+    await localAuthDb.promoteConfiguredOwner(user.id);
+    const store = localAuthDb.getStore();
+    const conflict = store.accounts.some((account) => account.role === 'owner' && account.id !== user.id);
+    user = resolveEffectiveRole(user, process.env.OWNER_EMAIL, conflict);
     token = await localAuthDb.createSession(user.id);
     await audit(null, user.id, 'LOGIN_SUCCEEDED', requestId);
   }
 
-  const complete = Boolean(user.email_verified_at && user.mobile_verified_at);
+  const complete = hasCompletedLoginVerification(user);
   return {
     status: 200,
     headers: { 'Set-Cookie': sessionCookie(token) },
@@ -577,6 +803,7 @@ async function verifyEmail(req, body, requestId) {
       outcome = await withDb(async (db) => {
         if (!isProduction() && code === '123456') {
           await db.query("UPDATE customer_accounts SET email_verified_at=now(),status=CASE WHEN status='PENDING_VERIFICATION' AND mobile_verified_at IS NOT NULL THEN 'ACTIVE' ELSE status END,updated_at=now() WHERE id=$1", [user.id]);
+          await promoteVerifiedOwner(db, user.id);
           await audit(db, user.id, 'EMAIL_VERIFIED', requestId);
           return true;
         }
@@ -589,6 +816,7 @@ async function verifyEmail(req, body, requestId) {
         }
         await db.query('UPDATE email_otp_challenges SET consumed_at=now() WHERE id=$1', [challenge.id]);
         await db.query("UPDATE customer_accounts SET email_verified_at=now(),status=CASE WHEN status='PENDING_VERIFICATION' AND mobile_verified_at IS NOT NULL THEN 'ACTIVE' ELSE status END,updated_at=now() WHERE id=$1", [user.id]);
+        await promoteVerifiedOwner(db, user.id);
         await audit(db, user.id, 'EMAIL_VERIFIED', requestId);
         return true;
       });
@@ -611,6 +839,7 @@ async function verifyEmail(req, body, requestId) {
       email_verified_at: new Date().toISOString(),
       status: user.mobile_verified_at ? 'ACTIVE' : user.status,
     });
+    await localAuthDb.promoteConfiguredOwner(user.id);
   }
 
   if (!outcome) return { status: 400, body: { error: 'That code is invalid or expired. Request a new code and try again.' } };
@@ -649,6 +878,7 @@ async function verifyMobile(req, body, requestId) {
     try {
       await withDb(async (db) => {
         await db.query("UPDATE customer_accounts SET mobile_verified_at=now(),status=CASE WHEN status='PENDING_VERIFICATION' AND email_verified_at IS NOT NULL THEN 'ACTIVE' ELSE status END,updated_at=now() WHERE id=$1", [user.id]);
+        await promoteVerifiedOwner(db, user.id);
         await db.query("UPDATE phone_otp_challenges SET approved_at=now() WHERE user_id=$1 AND approved_at IS NULL", [user.id]);
         await audit(db, user.id, 'MOBILE_VERIFIED', requestId);
       });
@@ -663,6 +893,7 @@ async function verifyMobile(req, body, requestId) {
       mobile_verified_at: new Date().toISOString(),
       status: user.email_verified_at ? 'ACTIVE' : user.status,
     });
+    await localAuthDb.promoteConfiguredOwner(user.id);
     await audit(null, user.id, 'MOBILE_VERIFIED', requestId);
   }
 
@@ -693,7 +924,7 @@ async function me(req) {
     status: 200,
     body: {
       user: publicUser(user),
-      dashboardAllowed: Boolean(user.email_verified_at && user.mobile_verified_at && user.status === 'ACTIVE'),
+      dashboardAllowed: hasCompletedLoginVerification(user),
     },
   };
 }
@@ -731,7 +962,7 @@ export async function handleAuth(req, action, body = {}) {
   const act = canonicalAction(action);
   const method = req.method ? req.method.toUpperCase() : 'GET';
 
-  if (!(method === 'GET' && act === 'me') && !originOk(req)) {
+  if (!(method === 'GET' && ['me', 'team'].includes(act)) && !originOk(req)) {
     return { status: 403, body: { error: 'Request origin could not be verified.' } };
   }
   const readActions = new Set(['me', 'signup', 'login', 'verify-email', 'verify-mobile', 'resend']);
@@ -775,6 +1006,8 @@ export async function handleAuth(req, action, body = {}) {
       }
     } else if (act === 'logout') {
       result = await logout(req);
+    } else if (['team','team-approve','team-revoke','team-remove'].includes(act)) {
+      result = await teamRequest(req, act, body, requestId);
     } else {
       result = { status: 404, body: { error: `Authentication route "${action}" not found.` } };
     }

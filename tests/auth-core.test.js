@@ -85,16 +85,21 @@ test('signup, login, and verification succeed in local development mode without 
   const testMobile = `9${Date.now().toString().slice(-9)}`;
   const testIp = `10.0.${Math.floor(Math.random() * 200)}.${Math.floor(Math.random() * 200)}`;
   const testPassword = 'password-testing-123';
+  const originalConsoleLog = console.log;
+  const signupLogs = [];
 
   try {
     // 1. Signup
+    console.log = (...args) => signupLogs.push(args.join(' '));
     const signupRes = await handleAuth({ method: 'POST', headers: { origin: 'http://localhost:5173', host: 'localhost:5173' }, socket: { remoteAddress: testIp } }, 'signup', {
       name: 'Dev Tester', email: testEmail, mobile: testMobile, password: testPassword, verificationConsent: true
     });
+    console.log = originalConsoleLog;
     assert.equal(signupRes.status, 201);
     assert.equal(signupRes.body.ok, true);
     assert.equal(signupRes.body.next, '/auth/verify');
     assert.ok(signupRes.headers['Set-Cookie']);
+    assert.doesNotMatch(signupLogs.join(' '), /\b\d{6}\b|verification code/i);
 
     const cookieHeader = signupRes.headers['Set-Cookie'].split(';')[0];
 
@@ -153,6 +158,7 @@ test('signup, login, and verification succeed in local development mode without 
     });
     assert.equal(loginUnknown.status, 401);
   } finally {
+    console.log = originalConsoleLog;
     if (previousOrigin === undefined) delete process.env.PUBLIC_SITE_URL; else process.env.PUBLIC_SITE_URL = previousOrigin;
   }
 });

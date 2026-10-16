@@ -7,8 +7,8 @@ if (!process.env.DATABASE_URL) {
 } else {
   let database = '';
   try { database = new URL(process.env.DATABASE_URL).pathname.replace(/^\//, ''); } catch { /* guarded below */ }
-  if (!['reachpay_dev', 'reachpay_test'].includes(database)) {
-    process.stderr.write('[ReachPay beneficiary DB] Refusing to migrate a database other than reachpay_dev or reachpay_test.\n');
+  if (!['reachpay', 'reachpay_dev', 'reachpay_test'].includes(database)) {
+    process.stderr.write('[ReachPay beneficiary DB] Refusing to migrate a database other than reachpay, reachpay_dev or reachpay_test.\n');
     process.exitCode = 1;
   } else {
     const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 1, connectionTimeoutMillis: 5000 });

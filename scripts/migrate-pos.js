@@ -9,8 +9,8 @@ if (!process.env.DATABASE_URL) {
   } else {
     process.stdout.write('[ReachPay POS DB] No DATABASE_URL configured. Local JSON storage is available for development at data/local-pos-store.json.\n');
   }
-} else if (!['reachpay_dev', 'reachpay_test'].includes(new URL(process.env.DATABASE_URL).pathname.replace(/^\//, ''))) {
-  process.stderr.write('[ReachPay POS DB] Refusing to migrate any database except reachpay_dev or reachpay_test.\n');
+} else if (!['reachpay', 'reachpay_dev', 'reachpay_test'].includes(new URL(process.env.DATABASE_URL).pathname.replace(/^\//, ''))) {
+  process.stderr.write('[ReachPay POS DB] Refusing to migrate any database except reachpay, reachpay_dev or reachpay_test.\n');
   process.exitCode = 1;
 } else {
   const posSqlUrl = new URL('../server/pos/pos-migration.sql', import.meta.url);

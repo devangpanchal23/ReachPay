@@ -3,8 +3,8 @@ import { expireAbandonedTransfers } from '../server/financial/transaction-mainte
 if (!process.env.DATABASE_URL) throw new Error('DATABASE_URL is required.');
 const databaseUrl = new URL(process.env.DATABASE_URL);
 const database = databaseUrl.pathname.replace(/^\//, '');
-if (!['reachpay_dev', 'reachpay_test'].includes(database)) {
-  throw new Error('Refusing to expire transactions outside reachpay_dev or reachpay_test.');
+if (!['reachpay', 'reachpay_dev', 'reachpay_test'].includes(database)) {
+  throw new Error('Refusing to expire transactions outside reachpay, reachpay_dev or reachpay_test.');
 }
 
 const { Pool } = await import('pg');

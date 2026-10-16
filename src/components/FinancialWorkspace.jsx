@@ -551,7 +551,7 @@ export default function FinancialWorkspace({ user, onLogout }) {
     }
 
     if (!terminalConfig?.isConfigured) {
-      showNotification('Please configure your Paytm MID and TID before initiating sales.', 'error');
+      showNotification(`Please configure your ${posProvider === 'paytm' ? 'Paytm' : 'PhonePe'} MID and TID before initiating sales.`, 'error');
       setIsConfiguring(true);
       return;
     }
@@ -1205,11 +1205,11 @@ export default function FinancialWorkspace({ user, onLogout }) {
           </div>}
 
           {/* Transaction History Section */}
-          {posProvider === 'paytm' ? <div className="dashboard-card pos-history-card">
+          <div className="dashboard-card pos-history-card">
             <div className="pos-history-header">
               <div>
                 <span className="eyebrow">TRANSACTION LEDGER</span>
-                <h2>POS Transaction History</h2>
+                <h2>{posProvider === 'paytm' ? 'Paytm' : 'PhonePe'} POS Transaction History</h2>
               </div>
               <div className="history-filter-wrap">
                 <span className="filter-label">Status:</span>
@@ -1329,13 +1329,10 @@ export default function FinancialWorkspace({ user, onLogout }) {
               <div className="history-empty-state">
                 <CreditCard size={36} />
                 <h3>No transactions recorded</h3>
-                <p>Transactions initiated from your Paytm POS terminal will appear here.</p>
+                <p>Transactions initiated from your {posProvider === 'paytm' ? 'Paytm' : 'PhonePe'} POS terminal will appear here.</p>
               </div>
             )}
-          </div> : <div className="dashboard-card pos-history-card phonepe-history-card">
-            <h2>PhonePe transaction history</h2>
-            <p>Per-transaction verification uses PhonePe's signed status API and callbacks. Pending records can also be reconciled through PhonePe's transaction search API; unmatched or mismatched results stay pending and never become successful.</p>
-          </div>}
+          </div>
         </div>
       )}
 

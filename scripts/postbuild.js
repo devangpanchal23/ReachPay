@@ -44,6 +44,7 @@ const privateRoutes = [
   ['/auth/login', 'Sign in', 'Sign in to your ReachPay customer account.'],
   ['/auth/verify', 'Verify account', 'Verify your ReachPay email address and mobile number.'],
   ['/dashboard', 'Customer portal', 'ReachPay customer account portal.'],
+  ['/team-access', 'Team access', 'Owner access management for ReachPay accounts.'],
 ];
 for (const [route, title, description] of privateRoutes) {
   const html = template.replace(/<title>[^<]*<\/title>/, `<title>${encoded(`${title} | ReachPay`)}</title>`)

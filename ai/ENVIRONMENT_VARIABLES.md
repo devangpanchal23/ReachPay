@@ -10,12 +10,17 @@
 | `UPSTASH_REDIS_REST_TOKEN` | Server-side credential for Redis REST | Upstash project | Yes in production |
 | `PORT` | Local Node API port (default 8788) | Local developer setting | Optional |
 | `APP_ORIGIN` | Intended application origin for the settlement foundation | Local/deployment setting | Optional |
+| `OWNER_EMAIL` | Server-only address eligible for owner assignment after verification | ReachPay owner account | Required for team administration |
 | `PAYIN_PROVIDER`, `POS_PROVIDER`, `PAYOUT_PROVIDER`, `BBPS_PROVIDER` | Provider selection placeholders; values remain `unconfigured` and do not activate processing | Contracted provider and internal approval | Not currently used to process transactions |
 | `PAYMENT_WEBHOOK_SECRET`, `PAYOUT_WEBHOOK_SECRET`, `BBPS_WEBHOOK_SECRET`, `CRON_SECRET` | Reserved server-side secrets for future verified webhook and job integrations | Approved provider/secret manager | Not currently consumed |
 
 Use `.env.example` as a template. Never commit `.env`, print secrets, or prefix server credentials with `VITE_`. Build with `PUBLIC_SITE_URL` set to the confirmed site origin; until then the build uses the reserved `reachpay.example` placeholder domain.
 
 ## Customer authentication
+
+`OWNER_EMAIL` is a server-only RBAC seed value. Set it to `devangpan23@gmail.com` in local `.env` and in the Vercel project environment. Matching is case-insensitive after trimming. The migration and login-time promotion accept only the matching active account with a verified email, and never replace an existing different owner. If that account does not exist or is not yet verified and active, ownership remains unassigned until the account is verified and the migration is rerun or the account next logs in.
+
+After setting `OWNER_EMAIL` and `DATABASE_URL`, run `npm run db:migrate:auth`. This applies the auth, RBAC, and owner bootstrap migrations. Production does not auto-apply migrations during app requests or deployment, so run the command against the production database before redeploying. Set `OWNER_EMAIL` for Vercel Production before redeployment. Do not use a `VITE_` variable.
 
 `DATABASE_URL` is a TLS PostgreSQL connection from the managed DB. `AUTH_OTP_SECRET` and `AUTH_RATE_LIMIT_SECRET` are independent randomly generated values of at least 32 bytes. `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, and `SMTP_FROM_EMAIL` configure the private email verification sender. Gmail commonly supports `smtp.gmail.com:587` with STARTTLS; use the full Gmail address as `SMTP_USER`, and the authorized sender as `SMTP_FROM_EMAIL`. Google Workspace policy may require admin-approved OAuth or SMTP relay.
 

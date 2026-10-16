@@ -17,7 +17,12 @@ function id(value) { return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-
 function cleanText(value, max = 180) { return typeof value === 'string' ? value.trim().slice(0, max) : ''; }
 function dataKey() {
   const value = process.env.DMT_DATA_ENCRYPTION_KEY;
-  if (!value || value.length < 32) throw Object.assign(new Error('DMT_DATA_ENCRYPTION_NOT_CONFIGURED'), { code: 'DMT_DATA_ENCRYPTION_NOT_CONFIGURED' });
+  if (!value || value.length < 32) {
+    if (process.env.NODE_ENV !== 'production') {
+      return createHash('sha256').update('reachpay_dev_fallback_dmt_data_encryption_key_32_bytes_long').digest();
+    }
+    throw Object.assign(new Error('DMT_DATA_ENCRYPTION_NOT_CONFIGURED'), { code: 'DMT_DATA_ENCRYPTION_NOT_CONFIGURED' });
+  }
   return createHash('sha256').update(value).digest();
 }
 function encrypt(value) {

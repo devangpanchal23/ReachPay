@@ -4,9 +4,12 @@
 Browser
   ├── React/Vite public pages (CSR with generated route HTML/SEO metadata)
   ├── Customer signup/sign-in and OTP verification
-  └── Authenticated customer safe-mode workspace
-        ├── GET /api/health
-        └── financial API paths fail closed (HTTP 503)
+  └── Customer portal
+        ├── Limited profile and dashboard for other accounts
+        ├── Owner-approved transaction workspace with per-request database role checks
+        └── Owner-only team access management
+  ├── GET /api/health
+  └── Financial APIs require an active owner or approved-member session and remain disabled when no service is implemented (HTTP 503)
 
 POST /api/contact
   ├── Vercel Node function OR local Node HTTP API

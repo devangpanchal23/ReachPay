@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 
 if (!process.env.DATABASE_URL) throw new Error('DATABASE_URL is required.');
 const database = new URL(process.env.DATABASE_URL).pathname.replace(/^\//, '');
-if (!['reachpay_dev', 'reachpay_test'].includes(database)) throw new Error('Refusing to migrate any database except reachpay_dev or reachpay_test.');
+if (!['reachpay', 'reachpay_dev', 'reachpay_test'].includes(database)) throw new Error('Refusing to migrate any database except reachpay, reachpay_dev or reachpay_test.');
 const { Pool } = await import('pg');
 const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 1, connectionTimeoutMillis: 5000 });
 try {

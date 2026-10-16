@@ -21,6 +21,10 @@ The customer auth routes are `/auth/signup`, `/auth/login`, `/auth/verify` and `
 
 Signup validates name (2–100 characters), email (up to 254), password (12–128), and country-aware mobile numbering. The country selector defaults to India: its country code is displayed separately and the national-number field accepts exactly 10 digits. The server uses the same international phone metadata and rejects invalid, overlong, or fixed-line numbers. Login applies equivalent email/mobile and password-length checks.
 
+## Account access
+
+New accounts are `limited`. Only the configured `OWNER_EMAIL` account can manage the team. The owner can add members, then separately approve transaction access. Revoking a member immediately removes active sessions and transaction access. Set the server-only `OWNER_EMAIL=devangpan23@gmail.com` in local `.env` and Vercel Production, then run `npm run db:migrate:auth` against the target database. This applies the idempotent owner bootstrap migration after RBAC schema setup. Only the matching active account with a verified email is promoted. If it is not yet verified and active, register and verify it, then rerun the command. Login also promotes the matching verified account when no owner exists. New registrations do not gain owner access merely by using that address.
+
 ReachPay supports two authentication modes:
 - **Out of the box (Zero external setup required):** The local server includes a persistent local JSON database engine (`server/data/reachpay-auth.json`). In local development, signup and login work immediately without installing PostgreSQL. One-time verification codes are output directly to your terminal console, and the universal development code `123456` (or the "⚡ Verify all" button) can be used on `/auth/verify` to instantly verify email and mobile.
 - **PostgreSQL & production mode:** Configure `DATABASE_URL`, `AUTH_OTP_SECRET`, `AUTH_RATE_LIMIT_SECRET`, SMTP credentials, and Twilio Verify in `.env`. Apply the PostgreSQL schema using:
@@ -44,6 +48,16 @@ npm run preview
 ## Deployment
 
 The statically generated frontend routes and `/api/contact` serverless function can be deployed from this folder to Vercel. The build creates flat extensionless HTML routes, route-specific metadata, and a custom HTTP 404 page. Configure these server environment variables in the Vercel project:
+
+### GitHub CI/CD
+
+GitHub Actions runs a dependency audit, lint, tests, a production build, and the database migrations twice against a disposable PostgreSQL database for pull requests and pushes to `main`. The production deployment workflow repeats these checks before deploying on pushes to `main` through the Vercel CLI. To enable deployment, create a GitHub environment named `production` and add these environment secrets:
+
+- `VERCEL_TOKEN` — a Vercel access token.
+- `VERCEL_ORG_ID` — the Vercel team or account ID.
+- `VERCEL_PROJECT_ID` — the linked ReachPay Vercel project ID.
+
+Get the organization and project IDs by linking this repository to the ReachPay project with the Vercel CLI; keep `.vercel/` local and do not commit it. Add the Vercel production environment variables listed below in the Vercel project settings. In GitHub branch protection for `main`, require the `Lint, test, and build` check before merging. The workflow files are `.github/workflows/ci.yml` and `.github/workflows/deploy-vercel.yml`.
 
 - `RESEND_API_KEY` — API key from the ReachPay-owned Resend account.
 - `CONTACT_FROM_EMAIL` — sender address on a domain verified in Resend.

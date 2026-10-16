@@ -3,6 +3,7 @@ import { ArrowDown, ArrowRight, ArrowUpRight, Check, ChevronDown, Menu, ShieldCh
 import { industries, insights, navigation, pages, solutions } from '../content/site.js';
 import { emailError, nameError, passwordError, sanitizeNameInput } from '../shared/field-validation.js';
 import FinancialWorkspace from './components/FinancialWorkspace.jsx';
+import { isTransactionPath, canOpenTeamAccessPage, canOpenTransactionPath } from './route-access.js';
 
 const route = () => window.location.pathname.replace(/\/$/, '') || '/';
 
@@ -20,6 +21,7 @@ function Header({ user, onLogout }) {
       </div>)}
       {user ? (
         <div className="auth-nav-user">
+          {user.role === 'owner' && <a className="auth-nav-link" href="/team-access" onClick={() => setOpen(false)}>Team access</a>}
           <a href="/dashboard" className="auth-nav-dashboard" onClick={() => setOpen(false)}>
             <span className="user-avatar-initial">{user.name ? user.name.trim().charAt(0).toUpperCase() : 'U'}</span>
             <span className="user-nav-name">{user.name || 'Dashboard'}</span>
@@ -257,18 +259,11 @@ function AuthPage({ mode }) {
   </div></section>;
 }
 
-function DashboardPage({ user, onLogout, onUserLoaded }) {
-  const [loading, setLoading] = useState(!user);
-  const [activeUser, setActiveUser] = useState(user);
+function DashboardPage({ onLogout, onUserLoaded }) {
+  const [loading, setLoading] = useState(true);
+  const [activeUser, setActiveUser] = useState(null);
 
   useEffect(() => {
-    if (user) {
-      // This effect synchronizes the session-derived user into its local view state.
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      setActiveUser(user);
-      setLoading(false);
-      return;
-    }
     let mounted = true;
     authRequest('me', null, 'GET')
       .then((result) => {
@@ -285,7 +280,7 @@ function DashboardPage({ user, onLogout, onUserLoaded }) {
         if (mounted) window.location.replace('/auth/login');
       });
     return () => { mounted = false; };
-  }, [user, onUserLoaded]);
+  }, [onUserLoaded]);
 
   if (loading || !activeUser) {
     return (
@@ -298,12 +293,67 @@ function DashboardPage({ user, onLogout, onUserLoaded }) {
     );
   }
 
+  if (!['owner', 'approved_member'].includes(activeUser.role)) {
+    return <section className="section"><div className="container"><div className="dashboard-card"><h1>Welcome, {activeUser.name}</h1><p>Your account has limited access. Profile and public pages are available. Transaction features require owner approval.</p><p><strong>Access status:</strong> {activeUser.accessStatus || 'limited'}</p><p><strong>Email:</strong> {activeUser.email}</p><button className="button secondary" onClick={onLogout}>Sign out</button></div></div></section>;
+  }
+
   return (
     <div className="dashboard-full-viewport">
       <FinancialWorkspace user={activeUser} onLogout={onLogout} />
     </div>
   );
 }
+
+function TeamAccessPage({ user }) {
+  const [members, setMembers] = useState([]);
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [notice, setNotice] = useState('');
+  const [busy, setBusy] = useState(false);
+  const load = async () => {
+    const response = await fetch('/api/auth/team');
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || 'Unable to load team access.');
+    setMembers(payload.members || []);
+  };
+  useEffect(() => {
+    let active = true;
+    fetch('/api/auth/team').then(async (response) => {
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || 'Unable to load team access.');
+      if (active) setMembers(payload.members || []);
+    }).catch((error) => { if (active) setNotice(error.message); });
+    return () => { active = false; };
+  }, []);
+  const action = async (endpoint, memberId) => {
+    setBusy(true); setNotice('');
+    try {
+      const response = await fetch(`/api/auth/${endpoint}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: memberId }) });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || 'Unable to update member access.');
+      await load(); setNotice('Team access updated.');
+    } catch (error) { setNotice(error.message); }
+    finally { setBusy(false); }
+  };
+  const add = async (event) => {
+    event.preventDefault(); setBusy(true); setNotice('');
+    try {
+      const response = await fetch('/api/auth/team', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, password }) });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || 'Unable to add member.');
+      setEmail(''); setPassword(''); await load(); setNotice('Member added with pending, limited access.');
+    } catch (error) { setNotice(error.message); }
+    finally { setBusy(false); }
+  };
+  if (!canOpenTeamAccessPage(user)) return <section className="section"><div className="container"><div className="dashboard-card"><h1>Access not allowed</h1><p>Team access is available to the owner account only.</p></div></div></section>;
+  return <section className="section"><div className="container"><div className="section-heading"><h1>Team access</h1><p>Add accounts, approve transaction access, or revoke and remove members.</p></div>
+    <div className="dashboard-card"><h2>Add a member</h2><form className="auth-form" onSubmit={add}><label>Email<input type="email" autoComplete="email" value={email} onChange={(event) => setEmail(event.target.value)} required maxLength={254}/></label><label>Temporary password<input type="password" autoComplete="new-password" value={password} onChange={(event) => setPassword(event.target.value)} minLength={12} maxLength={128} required/></label><button className="button primary" disabled={busy}>Add pending member</button></form>
+      {notice && <p role="status">{notice}</p>}
+      <h2>Members</h2>{members.length ? <div className="table-responsive"><table className="pos-table"><thead><tr><th>Email</th><th>Access</th><th>Added</th><th>Actions</th></tr></thead><tbody>{members.map((member) => <tr key={member.id}><td>{member.email}</td><td>{member.status}</td><td>{new Date(member.created_at).toLocaleDateString()}</td><td>{member.status !== 'approved' && <button className="table-action-btn neutral" disabled={busy} onClick={() => void action('team-approve', member.id)}>Approve</button>}<button className="table-action-btn neutral" disabled={busy} onClick={() => void action('team-revoke', member.id)}>Revoke</button><button className="table-action-btn neutral" disabled={busy} onClick={() => void action('team-remove', member.id)}>Remove</button></td></tr>)}</tbody></table></div> : <p>No members have been added.</p>}
+    </div></div></section>;
+}
+
+function AccessDeniedPage() { return <section className="section"><div className="container"><div className="dashboard-card"><h1>Access not allowed</h1><p>Transaction features are available only to the owner and approved members.</p><a className="button secondary" href="/dashboard">Go to dashboard</a></div></div></section>; }
 
 function NotFound() { return <section className="not-found container"><span>404</span><h1>We can’t find that page.</h1><p>The address may have changed or the page may not exist.</p><a className="button primary" href="/">Return home <ArrowRight size={16}/></a></section>; }
 
@@ -361,7 +411,11 @@ export default function App() {
   else if (path === '/auth/signup') content = <AuthPage mode="signup"/>;
   else if (path === '/auth/login') content = <AuthPage mode="login"/>;
   else if (path === '/auth/verify') content = <AuthPage mode="verify"/>;
-  else if (path === '/dashboard') content = <DashboardPage user={currentUser} onLogout={handleLogout} onUserLoaded={setCurrentUser}/>;
+  else if (path === '/dashboard') content = <DashboardPage onLogout={handleLogout} onUserLoaded={setCurrentUser}/>;
+  else if (path === '/team-access') content = <TeamAccessPage user={currentUser}/>;
+  else if (isTransactionPath(path)) content = canOpenTransactionPath(path, currentUser)
+    ? <DashboardPage onLogout={handleLogout} onUserLoaded={setCurrentUser}/>
+    : <AccessDeniedPage/>;
   else if (path === '/contact') content = <ContactPage/>;
   else if (path === '/industries') content = <IndustriesPage/>;
   else if (path === '/insights') content = <InsightsPage/>;

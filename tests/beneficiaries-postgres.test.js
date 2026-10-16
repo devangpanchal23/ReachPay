@@ -30,8 +30,8 @@ test('PostgreSQL beneficiary lifecycle encrypts bank data, enforces owner scope,
   }, new URL(path, 'http://localhost'), body);
 
   try {
-    await db.query(`INSERT INTO customer_accounts(id,name,email,mobile_e164,password_hash,password_salt,status)
-      VALUES ($1,'Phase 3 Test',$2,$3,$4,$5,'ACTIVE'),($6,'Phase 3 Other',$7,$8,$4,$5,'ACTIVE')`,
+    await db.query(`INSERT INTO customer_accounts(id,name,email,mobile_e164,password_hash,password_salt,status,role,access_status)
+      VALUES ($1,'Phase 3 Test',$2,$3,$4,$5,'ACTIVE','approved_member','approved'),($6,'Phase 3 Other',$7,$8,$4,$5,'ACTIVE','approved_member','approved')`,
     [userId, `phase3-${emailId}@example.test`, `+1555${mobileSuffix}`, '0'.repeat(128), '0'.repeat(32), otherUserId, `phase3-other-${emailId}@example.test`, `+1666${mobileSuffix}`]);
     await db.query(`INSERT INTO customer_sessions(token_hash,user_id,expires_at) VALUES ($1,$2,now()+interval '1 hour'),($3,$4,now()+interval '1 hour')`, [hashToken(token), userId, hashToken(otherToken), otherUserId]);
 

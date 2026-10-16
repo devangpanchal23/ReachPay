@@ -1,7 +1,8 @@
 import http from 'node:http';
 import { handleContact } from './contact-handler.js';
-import { handleAuth } from './auth-controller.js';
+import { currentUser, handleAuth } from './auth-controller.js';
 import { providerStatus } from './financial/provider.js';
+import { hasTransactionAccess } from './rbac-policy.js';
 
 import { handlePOSRequest } from './pos/pos-controller.js';
 import { handleBeneficiaryRequest } from './financial/beneficiaries.js';
@@ -127,7 +128,12 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(result.status, { 'Content-Type': 'application/json; charset=utf-8' });
     return res.end(JSON.stringify(result.body));
   }
-  if (url.pathname.startsWith('/api/')) {
+  if (url.pathname.startsWith('/api/') && url.pathname !== '/api/contact') {
+    let user;
+    try { user = await currentUser(req); }
+    catch { res.writeHead(503, { 'Content-Type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ error: 'AUTHENTICATION_STORE_UNAVAILABLE' })); }
+    if (!user) { res.writeHead(401, { 'Content-Type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ error: 'AUTHENTICATION_REQUIRED' })); }
+    if (!hasTransactionAccess(user)) { res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ error: 'ACCESS_FORBIDDEN' })); }
     res.writeHead(503, { 'Content-Type': 'application/json; charset=utf-8' });
     return res.end(JSON.stringify({ error: 'SERVICE_NOT_CONFIGURED', message: 'Financial actions remain disabled until database repositories and authorized providers are integrated.' }));
   }
