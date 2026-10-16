@@ -1,6 +1,27 @@
 {
   "terminals": [
     {
+      "id": "d560c930-6061-4149-95e0-22b942d63111",
+      "user_id": "521f618d-fefe-4680-8feb-4c0ad29017e8",
+      "provider": "phonepe",
+      "environment": "staging",
+      "mid": "M23576Q1GUTMU",
+      "tid": "MST25120613002387304517172",
+      "client_id": "reachpay",
+      "store_id": "MS2511061814576700435417",
+      "external_mid": "312067000001602",
+      "external_tid": "12659138SSR",
+      "provider_verification_status": "UNVERIFIED",
+      "encrypted_merchant_key": null,
+      "encrypted_merchant_key_iv": null,
+      "encrypted_merchant_key_tag": null,
+      "status": "UNTESTED",
+      "last_tested_at": null,
+      "last_status_message": "Configuration updated.",
+      "created_at": "2026-10-12T17:43:07.656Z",
+      "updated_at": "2026-10-12T17:43:11.679Z"
+    },
+    {
       "id": "118be9d6-e974-4caf-a790-d6b44273a4c4",
       "user_id": null,
       "provider": "paytm",
@@ -5905,5 +5926,6 @@
       "created_at": "2026-10-07T05:36:06.442Z"
     }
   ],
-  "version": 1
+  "version": 1,
+  "webhookEvents": []
 }
