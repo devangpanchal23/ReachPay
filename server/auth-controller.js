@@ -4,6 +4,7 @@ import { clearSessionCookie, hashOtp, hashPassword, hashToken, newEmailOtp, newS
 import { checkPhoneOtp, sendPhoneOtp } from './sms/twilio-verify.js';
 import { localAuthDb } from './auth-storage.js';
 import { canManageTeam, hasCompletedLoginVerification, memberTransition, resolveEffectiveRole } from './rbac-policy.js';
+import { authEnvironmentStatus, isAllowedDatabaseUrl, parseDatabaseUrl, postgresPoolConfig } from './database-config.js';
 
 const DEV_FALLBACK_SECRET = 'reachpay_development_auth_secret_key_at_least_32_bytes_long_fallback';
 
@@ -73,15 +74,14 @@ async function autoMigrate(p) {
 
 async function createPool(connectionString) {
   const { Pool } = await import('pg');
-  const p = new Pool({
-    connectionString,
-    ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: true } : undefined,
+  const p = new Pool(postgresPoolConfig(connectionString, {
+    production: isProduction(),
     max: 8,
     idleTimeoutMillis: 30_000,
     connectionTimeoutMillis: 3_000,
-  });
+  }));
   p.on('error', (err) => {
-    console.error('[ReachPay DB Pool error]:', err.message);
+    logAuthFailure(randomUUID(), err, 'database_pool');
   });
   return p;
 }
@@ -96,19 +96,14 @@ async function pool() {
   if (poolAvailable === false && !requiresPostgres()) {
     return null;
   }
-  let database;
-  let parsedUrl;
-  try {
-    parsedUrl = new URL(process.env.DATABASE_URL);
-    database = parsedUrl.pathname.replace(/^\//, '');
-  } catch {
-    if (requiresPostgres()) throw new Error('DATABASE_NOT_CONFIGURED');
+  const databaseTarget = parseDatabaseUrl(process.env.DATABASE_URL);
+  if (!databaseTarget) {
+    if (requiresPostgres()) throw new Error('DATABASE_URL_INVALID');
     poolAvailable = false;
     return null;
   }
-  if (!['reachpay', 'reachpay_dev', 'reachpay_test'].includes(database)) {
+  if (!isAllowedDatabaseUrl(process.env.DATABASE_URL)) {
     if (requiresPostgres()) throw new Error('DATABASE_NOT_ALLOWED');
-    console.warn(`[ReachPay DB] Database "${database}" is not in allowlist (reachpay, reachpay_dev, reachpay_test). Using local database store.`);
     poolAvailable = false;
     return null;
   }
@@ -122,8 +117,8 @@ async function pool() {
           poolAvailable = true;
           return p;
         } catch (err) {
-          // If the configured db name was 'reachpay' and it failed because db does not exist, try 'reachpay_dev' if available
-          if (err.code === '3D000' && database === 'reachpay' && !requiresPostgres()) {
+          const configuredTarget = parseDatabaseUrl(process.env.DATABASE_URL);
+          if (err.code === '3D000' && !requiresPostgres() && configuredTarget?.database === 'reachpay' && !configuredTarget.isNeon) {
             try {
               await p.end().catch(() => {});
               const devUrl = new URL(process.env.DATABASE_URL);
@@ -139,14 +134,14 @@ async function pool() {
             }
           }
           if (requiresPostgres()) throw err;
-          console.warn(`[ReachPay DB] PostgreSQL connection to "${database}" failed (${err.message}). Using persistent local store.`);
+          logAuthFailure(randomUUID(), err, 'database_connection');
           poolAvailable = false;
           await p.end().catch(() => {});
           return null;
         }
       } catch (err) {
         if (requiresPostgres()) throw err;
-        console.warn('[ReachPay DB] Could not initialize PostgreSQL Pool:', err.message);
+        logAuthFailure(randomUUID(), err, 'database_pool_initialization');
         poolAvailable = false;
         return null;
       }
@@ -173,21 +168,64 @@ function genericError(status = 503) {
 }
 
 function authFailureCategory(error) {
-  const code = String(error?.code || '');
-  const message = String(error?.message || '');
-  if (message === 'DATABASE_NOT_CONFIGURED') return 'database_not_configured';
-  if (message === 'AUTH_RATE_LIMIT_SECRET_NOT_CONFIGURED') return 'rate_limit_secret_not_configured';
-  if (code === '28P01' || code === '28000') return 'database_credentials_rejected';
-  if (code === '3D000') return 'database_not_found';
-  if (code === '42P01' || code === '42703') return 'database_migration_required';
-  if (code.startsWith('08') || ['ECONNREFUSED', 'ENOTFOUND', 'ETIMEDOUT', 'ECONNRESET'].includes(code)) return 'database_unavailable';
-  if (message === 'EMAIL_OTP_NOT_CONFIGURED') return 'email_otp_not_configured';
-  if (message === 'EMAIL_DELIVERY_FAILED') return 'email_delivery_failed';
+  const errors = [];
+  for (let current = error; current && errors.length < 4; current = current.cause) errors.push(current);
+  const messages = errors.map((entry) => String(entry?.message || ''));
+  const codes = errors.map((entry) => String(entry?.code || ''));
+  if (messages.includes('DATABASE_NOT_CONFIGURED')) return 'database_not_configured';
+  if (messages.includes('DATABASE_URL_INVALID')) return 'database_url_invalid';
+  if (messages.includes('DATABASE_UNAVAILABLE')) return 'database_unavailable';
+  if (messages.includes('AUTH_RATE_LIMIT_SECRET_NOT_CONFIGURED')) return 'rate_limit_secret_not_configured';
+  if (codes.some((code) => ['28P01', '28000'].includes(code))) return 'database_credentials_rejected';
+  if (codes.includes('3D000')) return 'database_not_found';
+  if (codes.some((code) => ['42P01', '42703'].includes(code))) return 'database_migration_required';
+  if (codes.some((code) => code.startsWith('08') || ['ECONNREFUSED', 'ENOTFOUND', 'ETIMEDOUT', 'ECONNRESET', 'ERR_TLS_CERT_ALTNAME_INVALID', 'CERT_HAS_EXPIRED', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE'].includes(code))) return 'database_unavailable';
+  if (messages.includes('EMAIL_OTP_NOT_CONFIGURED')) return 'email_otp_not_configured';
+  if (messages.includes('SMS_OTP_NOT_CONFIGURED')) return 'sms_otp_not_configured';
+  if (messages.includes('EMAIL_DELIVERY_FAILED')) return 'email_delivery_failed';
+  if (messages.includes('SMS_DELIVERY_FAILED')) return 'sms_delivery_failed';
+  if (messages.includes('DATABASE_NOT_ALLOWED')) return 'database_target_not_allowed';
   return 'unexpected_auth_failure';
 }
 
 function logAuthFailure(requestId, error, context = 'request') {
-  console.error(JSON.stringify({ level: 'error', event: 'auth.failure', requestId, context, category: authFailureCategory(error), code: error?.code || undefined }));
+  console.error(JSON.stringify({ level: 'error', event: 'auth.failure', requestId, context, category: authFailureCategory(error) }));
+}
+
+export async function authHealthStatus() {
+  const configuration = authEnvironmentStatus();
+  let databaseConnected = false;
+  let schemaReady = false;
+  let ownerAccountVerified = false;
+  try {
+    const p = await pool();
+    if (p) {
+      databaseConnected = true;
+      const { rows } = await p.query(`SELECT name, to_regclass('public.' || name) IS NOT NULL AS present
+        FROM unnest($1::text[]) AS required(name)`, [[
+          'customer_accounts', 'customer_sessions', 'email_otp_challenges',
+          'phone_otp_challenges', 'auth_rate_limits', 'auth_audit_events',
+          'rbac_audit_events',
+        ]]);
+      schemaReady = rows.length === 7 && rows.every((row) => row.present);
+      if (schemaReady && configuration.ownerEmailConfigured) {
+        const owner = await p.query(`SELECT EXISTS (
+          SELECT 1 FROM customer_accounts
+          WHERE lower(btrim(email))=lower(btrim($1)) AND role='owner'
+            AND email_verified_at IS NOT NULL AND status='ACTIVE'
+        ) AS verified`, [process.env.OWNER_EMAIL]);
+        ownerAccountVerified = Boolean(owner.rows[0]?.verified);
+      }
+    }
+  } catch (error) {
+    logAuthFailure(randomUUID(), error, 'health_database');
+  }
+  return {
+    configuration,
+    databaseConnected,
+    schemaReady,
+    ownerAccountVerified,
+  };
 }
 
 export function originOk(req) {
@@ -439,8 +477,10 @@ async function sendEmailCode(user) {
   const { SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, SMTP_FROM_EMAIL } = process.env;
   const otpSecret = getOtpSecret();
   const code = newEmailOtp();
-  const isSmtpConfigured = Boolean(SMTP_HOST && SMTP_PORT && SMTP_USER && SMTP_PASS && SMTP_FROM_EMAIL && otpSecret && otpSecret.length >= 32);
-  if (isProduction() && !isSmtpConfigured) throw new Error('EMAIL_OTP_NOT_CONFIGURED');
+  const smtpConfigured = Boolean(SMTP_HOST && SMTP_PORT && SMTP_USER && SMTP_PASS && SMTP_FROM_EMAIL);
+  const resendConfigured = Boolean(process.env.RESEND_API_KEY && process.env.CONTACT_FROM_EMAIL);
+  const emailConfigured = Boolean((smtpConfigured || resendConfigured) && otpSecret && otpSecret.length >= 32);
+  if (isProduction() && !emailConfigured) throw new Error('EMAIL_OTP_NOT_CONFIGURED');
 
   const p = await pool();
   if (p) {
@@ -459,18 +499,38 @@ async function sendEmailCode(user) {
     await localAuthDb.createEmailChallenge(user.id, hashOtp(code, otpSecret || DEV_FALLBACK_SECRET), code);
   }
 
-  if (isSmtpConfigured) {
+  if (smtpConfigured) {
     const { default: nodemailer } = await import('nodemailer');
     const transport = nodemailer.createTransport({ host: SMTP_HOST, port: Number(SMTP_PORT), secure: Number(SMTP_PORT) === 465, requireTLS: Number(SMTP_PORT) === 587, auth: { user: SMTP_USER, pass: SMTP_PASS }, connectionTimeout: 8_000, greetingTimeout: 8_000, socketTimeout: 10_000 });
     try {
       await transport.sendMail({ from: `ReachPay <${SMTP_FROM_EMAIL}>`, to: user.email, subject: 'Your ReachPay verification code', text: `Your ReachPay email verification code is ${code}. It expires in 10 minutes. If you did not request this, ignore this message.`, html: `<p>Use this code to verify your ReachPay email:</p><p style="font-size:28px;font-weight:bold;letter-spacing:6px">${code}</p><p>This code expires in 10 minutes. ReachPay will never ask you to share it.</p>` });
       return 'sent';
     } catch (err) {
-      console.error('[auth] Email SMTP delivery failed:', err.message);
-      // In dev mode, don't block user
-      if (process.env.NODE_ENV === 'production') throw new Error('EMAIL_DELIVERY_FAILED', { cause: err });
+      if (isProduction()) throw new Error('EMAIL_DELIVERY_FAILED', { cause: err });
+      return 'sent';
     } finally {
       transport.close();
+    }
+  }
+
+  if (resendConfigured) {
+    try {
+      const response = await fetch('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${process.env.RESEND_API_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          from: process.env.CONTACT_FROM_EMAIL,
+          to: [user.email],
+          subject: 'Your ReachPay verification code',
+          text: `Your ReachPay verification code is ${code}. It expires in 10 minutes. If you did not request this, ignore this message.`,
+          html: `<p>Use this code to verify your ReachPay email:</p><p style="font-size:28px;font-weight:bold;letter-spacing:6px">${code}</p><p>This code expires in 10 minutes. ReachPay will never ask you to share it.</p>`,
+        }),
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!response.ok) throw new Error('RESEND_REQUEST_REJECTED');
+      return 'sent';
+    } catch (err) {
+      if (isProduction()) throw new Error('EMAIL_DELIVERY_FAILED', { cause: err });
     }
   }
 
@@ -501,8 +561,7 @@ async function sendPhoneCode(user) {
       await sendPhoneOtp(user.mobile_e164);
       return 'sent';
     } catch (err) {
-      console.error('[auth] Twilio SMS delivery failed:', err.message);
-      if (process.env.NODE_ENV === 'production') throw err;
+      if (isProduction()) throw new Error('SMS_DELIVERY_FAILED', { cause: err });
     }
   }
 
@@ -539,14 +598,21 @@ async function signup(req, body, requestId) {
   }
 
   if (isProduction()) {
-    const emailReady = Boolean(process.env.SMTP_HOST && process.env.SMTP_PORT && process.env.SMTP_USER && process.env.SMTP_PASS && process.env.SMTP_FROM_EMAIL && process.env.AUTH_OTP_SECRET?.length >= 32);
-    const mobileReady = Boolean(process.env.SMS_PROVIDER === 'twilio-verify' && process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN && process.env.TWILIO_VERIFY_SERVICE_SID);
+    const environment = authEnvironmentStatus();
+    const emailReady = environment.emailOtpConfigured;
+    const mobileReady = environment.smsOtpConfigured;
     if (!emailReady || !mobileReady) {
       console.error(JSON.stringify({
         level: 'error',
         event: 'auth.signup_unavailable',
         requestId,
         category: 'verification_delivery_not_configured',
+        databaseConfigured: environment.databaseConfigured,
+        ownerEmailConfigured: environment.ownerEmailConfigured,
+        rateLimitSecretConfigured: environment.rateLimitSecretConfigured,
+        otpSecretConfigured: environment.otpSecretConfigured,
+        beneficiaryEncryptionConfigured: environment.beneficiaryEncryptionConfigured,
+        publicOriginConfigured: environment.publicOriginConfigured,
         emailReady,
         mobileReady,
       }));
@@ -901,7 +967,7 @@ async function verifyMobile(req, body, requestId) {
   return { status: 200, body: { ok: true, user: publicUser(refreshed) } };
 }
 
-async function resend(req, body) {
+async function resend(req, body, requestId) {
   const user = await currentUser(req);
   if (!user) return genericError(401);
   const channel = body?.channel;
@@ -912,7 +978,8 @@ async function resend(req, body) {
   try {
     const delivery = channel === 'email' ? await sendEmailCode(user) : await sendPhoneCode(user);
     return { status: 202, body: { ok: true, delivery, message: 'A new verification code was sent (use 123456 in dev mode).' } };
-  } catch {
+  } catch (error) {
+    logAuthFailure(requestId, error, `${channel}_otp_delivery`);
     return genericError(503);
   }
 }
@@ -1002,7 +1069,7 @@ export async function handleAuth(req, action, body = {}) {
       if (method === 'GET') {
         result = { status: 200, body: { ok: true, route: 'resend', message: 'Send a POST request with { channel: "email" | "mobile" } to resend code.' } };
       } else {
-        result = await resend(req, body);
+        result = await resend(req, body, requestId);
       }
     } else if (act === 'logout') {
       result = await logout(req);

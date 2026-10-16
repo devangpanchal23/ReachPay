@@ -1,5 +1,6 @@
 import process from 'node:process';
 import pg from 'pg';
+import { isAllowedDatabaseUrl, postgresPoolConfig } from '../server/database-config.js';
 
 const requiredTables = [
   'customer_accounts',
@@ -13,16 +14,15 @@ const requiredTables = [
 if (!process.env.DATABASE_URL) {
   console.error('DATABASE_URL is missing. Add your PostgreSQL connection string to .env.');
   process.exitCode = 1;
-} else if (!['reachpay', 'reachpay_dev', 'reachpay_test'].includes(new URL(process.env.DATABASE_URL).pathname.replace(/^\//, ''))) {
-  console.error('Refusing to inspect any database except reachpay, reachpay_dev or reachpay_test.');
+} else if (!isAllowedDatabaseUrl(process.env.DATABASE_URL)) {
+  console.error('Refusing to inspect this database target. Use a ReachPay database or a Neon PostgreSQL endpoint.');
   process.exitCode = 1;
 } else {
-  const pool = new pg.Pool({
-    connectionString: process.env.DATABASE_URL,
-    ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: true } : undefined,
+  const pool = new pg.Pool(postgresPoolConfig(process.env.DATABASE_URL, {
+    production: process.env.NODE_ENV === 'production',
     max: 1,
     connectionTimeoutMillis: 5000,
-  });
+  }));
   try {
     const result = await pool.query(
       "SELECT table_name AS name, to_regclass('public.' || table_name) IS NOT NULL AS exists FROM unnest($1::text[]) AS required(table_name)",

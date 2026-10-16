@@ -1,12 +1,13 @@
 import process from 'node:process';
 import { readFile } from 'node:fs/promises';
 import pg from 'pg';
+import { databaseNameFromUrl, isAllowedDatabaseUrl, postgresPoolConfig } from '../server/database-config.js';
 
 if (!process.env.DATABASE_URL) {
   process.stderr.write('DATABASE_URL is required to apply ReachPay schemas.\n');
   process.exitCode = 1;
-} else if (!['reachpay', 'reachpay_dev', 'reachpay_test'].includes(new URL(process.env.DATABASE_URL).pathname.replace(/^\//, ''))) {
-  process.stderr.write('Refusing to migrate any database except reachpay, reachpay_dev or reachpay_test.\n');
+} else if (!isAllowedDatabaseUrl(process.env.DATABASE_URL)) {
+  process.stderr.write('Refusing to migrate this database target. Use a ReachPay database or a Neon PostgreSQL endpoint.\n');
   process.exitCode = 1;
 } else {
   const migrations = [
@@ -14,14 +15,14 @@ if (!process.env.DATABASE_URL) {
     ['role-based access control', new URL('../database/migrations/002_rbac.sql', import.meta.url)],
     ['owner account bootstrap', new URL('../database/migrations/003_owner_bootstrap.sql', import.meta.url)],
   ];
-  const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: true } : undefined, max: 1, connectionTimeoutMillis: 5000 });
+  const pool = new pg.Pool(postgresPoolConfig(process.env.DATABASE_URL, { production: process.env.NODE_ENV === 'production', max: 1, connectionTimeoutMillis: 5000 }));
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
     await client.query("SELECT set_config('reachpay.owner_email', $1, true)", [String(process.env.OWNER_EMAIL || '').trim()]);
     for (const [name, path] of migrations) {
       await client.query(await readFile(path, 'utf8'));
-      process.stdout.write(`Applied ${name} schema.\n`);
+      process.stdout.write(`Applied ${name} schema to ${databaseNameFromUrl(process.env.DATABASE_URL)}.\n`);
     }
     await client.query('COMMIT');
     process.stdout.write('ReachPay customer authentication schema is ready.\n');

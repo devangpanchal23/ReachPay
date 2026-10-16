@@ -1,17 +1,17 @@
 import { readFile } from 'node:fs/promises';
 import pg from 'pg';
+import { databaseNameFromUrl, isAllowedDatabaseUrl, postgresPoolConfig } from '../server/database-config.js';
 
 if (!process.env.DATABASE_URL) {
   process.stderr.write('[ReachPay beneficiary DB] DATABASE_URL is required.\n');
   process.exitCode = 1;
 } else {
-  let database = '';
-  try { database = new URL(process.env.DATABASE_URL).pathname.replace(/^\//, ''); } catch { /* guarded below */ }
-  if (!['reachpay', 'reachpay_dev', 'reachpay_test'].includes(database)) {
-    process.stderr.write('[ReachPay beneficiary DB] Refusing to migrate a database other than reachpay, reachpay_dev or reachpay_test.\n');
+  const database = databaseNameFromUrl(process.env.DATABASE_URL);
+  if (!isAllowedDatabaseUrl(process.env.DATABASE_URL)) {
+    process.stderr.write('[ReachPay beneficiary DB] Refusing to migrate this database target. Use a ReachPay database or a Neon PostgreSQL endpoint.\n');
     process.exitCode = 1;
   } else {
-    const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 1, connectionTimeoutMillis: 5000 });
+    const pool = new pg.Pool(postgresPoolConfig(process.env.DATABASE_URL, { production: process.env.NODE_ENV === 'production', max: 1, connectionTimeoutMillis: 5000 }));
     try {
       const existing = await pool.query(`SELECT column_name FROM information_schema.columns
         WHERE table_schema='public' AND table_name='financial_beneficiaries'`);

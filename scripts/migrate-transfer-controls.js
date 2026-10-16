@@ -1,14 +1,14 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { databaseNameFromUrl, isAllowedDatabaseUrl, postgresPoolConfig } from '../server/database-config.js';
 
 if (!process.env.DATABASE_URL) throw new Error('DATABASE_URL is required.');
-const url = new URL(process.env.DATABASE_URL);
-const database = url.pathname.replace(/^\//, '');
-if (!['reachpay', 'reachpay_dev', 'reachpay_test'].includes(database)) throw new Error('Refusing to migrate any database except reachpay, reachpay_dev or reachpay_test.');
+const database = databaseNameFromUrl(process.env.DATABASE_URL);
+if (!isAllowedDatabaseUrl(process.env.DATABASE_URL)) throw new Error('Refusing to migrate this database target. Use a ReachPay database or a Neon PostgreSQL endpoint.');
 
 const { Pool } = await import('pg');
-const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 1, connectionTimeoutMillis: 5000 });
+const pool = new Pool(postgresPoolConfig(process.env.DATABASE_URL, { production: process.env.NODE_ENV === 'production', max: 1, connectionTimeoutMillis: 5000 }));
 try {
   await pool.query('SELECT 1 FROM financial_service_transactions LIMIT 0');
   await pool.query('SELECT 1 FROM financial_beneficiaries LIMIT 0');

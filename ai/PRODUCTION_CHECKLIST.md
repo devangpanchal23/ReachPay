@@ -8,13 +8,14 @@ Set server variables in **Vercel Project Settings > Environment Variables**. Put
 
 | Variables | Where | Required / notes | Status |
 |---|---|---|---|
-| `DATABASE_URL` | Vercel | Required PostgreSQL connection string for production auth and data. | To be confirmed |
+| `DATABASE_URL` | Vercel | Required PostgreSQL connection string for production auth and data. Neon `*.neon.tech` pooled and direct hosts are supported. | To be confirmed |
 | `OWNER_EMAIL` | Vercel | Required. Set to `devangpan23@gmail.com`; account must be verified before owner bootstrap. | To be confirmed |
 | `AUTH_OTP_SECRET`, `AUTH_RATE_LIMIT_SECRET`, `BENEFICIARY_ENCRYPTION_KEY` | Vercel | Required for production auth, OTP/rate limits, and beneficiary encryption. Generate strong independent values and preserve encryption keys. | To be confirmed |
 | `FUNDING_SOURCE_ENCRYPTION_KEY`, `DMT_DATA_ENCRYPTION_KEY` | Vercel | Required before enabling storage for the corresponding feature. | To be confirmed |
 | `PUBLIC_SITE_URL`, `APP_ORIGIN` | Vercel | Set to the verified HTTPS production origin. `PUBLIC_SITE_URL` is used by the build. | To be confirmed |
-| `RESEND_API_KEY`, `CONTACT_FROM_EMAIL`, `CONTACT_TO_EMAIL` | Vercel | Contact form delivery. Verified sender domain needed. | To be confirmed |
-| `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM_EMAIL` | Vercel | Email OTP delivery. Configure a working SMTP account and sender. | To be confirmed |
+| `RESEND_API_KEY`, `CONTACT_FROM_EMAIL` | Vercel | Contact form and optional email OTP delivery. For OTP, the From address must match a verified Resend sender domain. | To be confirmed |
+| `CONTACT_TO_EMAIL` | Vercel | Contact form destination only, not required for signup OTP. | To be confirmed |
+| `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM_EMAIL` | Vercel | Alternative email OTP delivery. All five are needed if SMTP is selected. | To be confirmed |
 | `SMS_PROVIDER`, `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_VERIFY_SERVICE_SID` | Vercel | SMS OTP. Confirm Twilio Verify configuration and delivery. | To be confirmed |
 | `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN` | Vercel | Required for globally consistent production rate limiting. | To be confirmed |
 | `PORT` | Vercel / local runtime | Local API default is `8788`; Vercel manages the runtime port. | To be confirmed |

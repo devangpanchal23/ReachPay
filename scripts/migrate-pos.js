@@ -1,6 +1,7 @@
 import process from 'node:process';
 import { readFile } from 'node:fs/promises';
 import pg from 'pg';
+import { isAllowedDatabaseUrl, postgresPoolConfig } from '../server/database-config.js';
 
 if (!process.env.DATABASE_URL) {
   if (process.env.NODE_ENV === 'production') {
@@ -9,17 +10,16 @@ if (!process.env.DATABASE_URL) {
   } else {
     process.stdout.write('[ReachPay POS DB] No DATABASE_URL configured. Local JSON storage is available for development at data/local-pos-store.json.\n');
   }
-} else if (!['reachpay', 'reachpay_dev', 'reachpay_test'].includes(new URL(process.env.DATABASE_URL).pathname.replace(/^\//, ''))) {
-  process.stderr.write('[ReachPay POS DB] Refusing to migrate any database except reachpay, reachpay_dev or reachpay_test.\n');
+} else if (!isAllowedDatabaseUrl(process.env.DATABASE_URL)) {
+  process.stderr.write('[ReachPay POS DB] Refusing to migrate this database target. Use a ReachPay database or a Neon PostgreSQL endpoint.\n');
   process.exitCode = 1;
 } else {
   const posSqlUrl = new URL('../server/pos/pos-migration.sql', import.meta.url);
-  const pool = new pg.Pool({
-    connectionString: process.env.DATABASE_URL,
-    ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: true } : undefined,
+  const pool = new pg.Pool(postgresPoolConfig(process.env.DATABASE_URL, {
+    production: process.env.NODE_ENV === 'production',
     max: 1,
     connectionTimeoutMillis: 5000,
-  });
+  }));
 
   try {
     const client = await pool.connect();
