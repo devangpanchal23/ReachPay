@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { hashOtp, hashPassword, normalizeEmail, normalizeMobile, parseCookies, safeEqualHex, sessionCookie, validateRegistration, verifyPassword } from '../server/auth-core.js';
-import { errorHasMigrationSignal, handleAuth, rateAllowed, safeAuthErrorResponse } from '../server/auth-controller.js';
+import { errorHasMigrationSignal, handleAuth, rateAllowed, reportAuthFailure, safeAuthErrorResponse } from '../server/auth-controller.js';
 import { validateSmsConfiguration } from '../server/sms/twilio-verify.js';
 import unavailableFinancialApi from '../api/[...path].js';
 import { cleanNationalInput, emailError, maxNationalDigits, nameError, passwordError, PHONE_COUNTRIES, phoneError } from '../shared/phone-validation.js';
@@ -95,6 +95,25 @@ test('wrapped PostgreSQL missing table and column failures are identified as mig
   assert.equal(response.body.reasonCode, 'DATABASE_MIGRATION_REQUIRED');
   assert.equal(response.headers['X-Request-Id'], 'migration-test');
   assert.doesNotMatch(JSON.stringify(response), /missing relation|42P01/);
+  const conflictTarget = safeAuthErrorResponse(Object.assign(new Error('no unique or exclusion constraint matching the ON CONFLICT specification'), { code: '42P10' }), 'constraint-test');
+  assert.equal(conflictTarget.status, 503);
+  assert.equal(conflictTarget.body.reasonCode, 'DATABASE_MIGRATION_REQUIRED');
+});
+
+test('unexpected database failures return safe 500 and log only a reason code and request id', () => {
+  const oldError = console.error;
+  const entries = [];
+  console.error = (...args) => entries.push(args.join(' '));
+  try {
+    const raw = Object.assign(new Error('private database detail'), { code: '23505', detail: 'private constraint data' });
+    const result = reportAuthFailure(raw, 'unexpected-db-test', 'test_auth_route');
+    assert.equal(result.status, 500);
+    assert.deepEqual(result.body, { error: 'The account service could not complete the request.', reasonCode: 'INTERNAL_AUTH_ERROR' });
+    assert.equal(entries.length, 1);
+    assert.match(entries[0], /"requestId":"unexpected-db-test"/);
+    assert.match(entries[0], /"reasonCode":"DATABASE_QUERY_FAILED"/);
+    assert.doesNotMatch(entries[0] + JSON.stringify(result), /private database detail|private constraint data|23505/);
+  } finally { console.error = oldError; }
 });
 
 test('email-verified mobile-pending login succeeds without valid SMS configuration and stays limited', async () => {

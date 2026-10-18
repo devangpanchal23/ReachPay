@@ -42,6 +42,15 @@ if (!process.env.DATABASE_URL) {
       if (!foundIndexes.has(index)) missingCount += 1;
       process.stdout.write(`${index}: ${foundIndexes.has(index) ? 'OK' : 'MISSING'}\n`);
     }
+    const rateKey = await pool.query(`SELECT EXISTS (
+      SELECT 1 FROM pg_index i
+      JOIN pg_class t ON t.oid = i.indrelid
+      JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY(i.indkey)
+      WHERE t.oid = to_regclass('public.auth_rate_limits')
+        AND i.indisunique AND i.indisvalid AND i.indnkeyatts = 1 AND a.attname = 'key_hash'
+    ) AS present`);
+    if (!rateKey.rows[0]?.present) missingCount += 1;
+    process.stdout.write(`auth_rate_limits.key_hash unique: ${rateKey.rows[0]?.present ? 'OK' : 'MISSING'}\n`);
     process.stdout.write(missingCount ? `Schema check failed: ${missingCount} required schema item(s) missing.\n` : 'Schema check passed.\n');
     if (missingCount) process.exitCode = 1;
   } catch {

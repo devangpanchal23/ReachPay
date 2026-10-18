@@ -8,6 +8,8 @@ import { authEnvironmentStatus, isAllowedDatabaseUrl, parseDatabaseUrl, postgres
 
 const DEV_FALLBACK_SECRET = 'reachpay_development_auth_secret_key_at_least_32_bytes_long_fallback';
 
+class AuthInputError extends Error {}
+
 function isPostgresConfigured() {
   return Boolean(process.env.DATABASE_URL && process.env.DATABASE_URL.trim().length > 0);
 }
@@ -32,6 +34,7 @@ async function autoMigrate(p) {
     const migrationFiles = [
       'auth-migration.sql',
       '../database/migrations/004_sms_resend_limits.sql',
+      '../database/migrations/005_auth_rate_limit_key_unique.sql',
       '../database/migrations/002_rbac.sql',
       '../database/migrations/003_owner_bootstrap.sql',
       'pos/pos-migration.sql',
@@ -169,60 +172,75 @@ function genericError(status = 503) {
 }
 
 function authFailureCategory(error) {
+  if (error instanceof AuthInputError) return 'INVALID_AUTH_INPUT';
   const errors = [];
   for (let current = error; current && errors.length < 4; current = current.cause) errors.push(current);
   const messages = errors.map((entry) => String(entry?.message || ''));
   const codes = errors.map((entry) => String(entry?.code || ''));
-  if (messages.includes('DATABASE_NOT_CONFIGURED')) return 'database_not_configured';
-  if (messages.includes('DATABASE_URL_INVALID')) return 'database_url_invalid';
-  if (messages.includes('DATABASE_MIGRATION_REQUIRED') || codes.some((code) => ['42P01', '42703'].includes(code))) return 'DATABASE_MIGRATION_REQUIRED';
-  if (codes.some((code) => ['28P01', '28000'].includes(code))) return 'database_credentials_rejected';
-  if (codes.includes('3D000')) return 'database_not_found';
-  if (messages.includes('DATABASE_UNAVAILABLE')) return 'database_unavailable';
-  if (messages.includes('AUTH_RATE_LIMIT_SECRET_NOT_CONFIGURED')) return 'rate_limit_secret_not_configured';
-  if (codes.some((code) => code.startsWith('08') || ['ECONNREFUSED', 'ENOTFOUND', 'ETIMEDOUT', 'ECONNRESET', 'ERR_TLS_CERT_ALTNAME_INVALID', 'CERT_HAS_EXPIRED', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE'].includes(code))) return 'database_unavailable';
-  if (messages.includes('EMAIL_OTP_NOT_CONFIGURED')) return 'email_otp_not_configured';
-  if (messages.includes('SMS_OTP_NOT_CONFIGURED')) return 'sms_otp_not_configured';
-  if (messages.includes('EMAIL_DELIVERY_FAILED')) return 'email_delivery_failed';
-  if (messages.includes('SMS_DELIVERY_FAILED')) return 'sms_delivery_failed';
+  if (messages.includes('DATABASE_NOT_CONFIGURED')) return 'DATABASE_NOT_CONFIGURED';
+  if (messages.includes('DATABASE_URL_INVALID')) return 'DATABASE_URL_INVALID';
+  if (messages.includes('DATABASE_NOT_ALLOWED')) return 'DATABASE_NOT_ALLOWED';
+  if (messages.includes('DATABASE_MIGRATION_REQUIRED') || codes.some((code) => ['42P01', '42703', '42P10', '42704', '42883'].includes(code))) return 'DATABASE_MIGRATION_REQUIRED';
+  if (codes.some((code) => ['28P01', '28000'].includes(code))) return 'DATABASE_CREDENTIALS_REJECTED';
+  if (codes.includes('3D000')) return 'DATABASE_NOT_FOUND';
+  if (messages.includes('DATABASE_UNAVAILABLE') || codes.some((code) => code.startsWith('08') || ['53300', '53400', '57P01', '57P02', '57P03', 'ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'ETIMEDOUT', 'ECONNRESET', 'EPIPE', 'ENETUNREACH', 'ERR_TLS_CERT_ALTNAME_INVALID', 'CERT_HAS_EXPIRED', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE'].includes(code))) return 'DATABASE_UNAVAILABLE';
+  if (messages.includes('DATABASE_QUERY_FAILED') || codes.some((code) => /^[0-9A-Z]{5}$/.test(code))) return 'DATABASE_QUERY_FAILED';
+  if (messages.includes('AUTH_RATE_LIMIT_SECRET_NOT_CONFIGURED')) return 'AUTH_RATE_LIMIT_SECRET_NOT_CONFIGURED';
+  if (messages.includes('EMAIL_OTP_NOT_CONFIGURED')) return 'EMAIL_OTP_NOT_CONFIGURED';
+  if (messages.includes('SMS_OTP_NOT_CONFIGURED')) return 'SMS_OTP_NOT_CONFIGURED';
+  if (messages.includes('EMAIL_DELIVERY_FAILED')) return 'EMAIL_DELIVERY_FAILED';
+  if (messages.includes('SMS_DELIVERY_FAILED')) return 'SMS_DELIVERY_FAILED';
   if (error?.reasonCode && ['SMS_NOT_CONFIGURED','SMS_CREDENTIALS_INVALID','SMS_PROVIDER_ERROR','SMS_NUMBER_NOT_ALLOWED','SMS_RATE_LIMITED','INVALID_PHONE'].includes(error.reasonCode)) return error.reasonCode;
   if (messages.includes('SMS_CREDENTIALS_INVALID')) return 'SMS_CREDENTIALS_INVALID';
-  if (messages.includes('DATABASE_NOT_ALLOWED')) return 'database_target_not_allowed';
-  return 'unexpected_auth_failure';
+  if (messages.includes('RATE_LIMIT')) return 'RATE_LIMITED';
+  return 'INTERNAL_AUTH_ERROR';
+}
+
+function databaseOperationError(error) {
+  const reasonCode = authFailureCategory(error);
+  const safeReason = ['DATABASE_MIGRATION_REQUIRED', 'DATABASE_UNAVAILABLE', 'DATABASE_CREDENTIALS_REJECTED', 'DATABASE_NOT_FOUND'].includes(reasonCode)
+    ? reasonCode
+    : 'DATABASE_QUERY_FAILED';
+  return new Error(safeReason, { cause: error });
 }
 
 export function errorHasMigrationSignal(error) {
   for (let current = error, depth = 0; current && depth < 5; current = current.cause, depth += 1) {
-    if (['42P01', '42703'].includes(String(current.code || '')) || current.message === 'DATABASE_MIGRATION_REQUIRED') return true;
+    if (['42P01', '42703', '42P10', '42704', '42883'].includes(String(current.code || '')) || current.message === 'DATABASE_MIGRATION_REQUIRED') return true;
   }
   return false;
 }
 
 function errorHasDatabaseAvailabilitySignal(error) {
   for (let current = error, depth = 0; current && depth < 5; current = current.cause, depth += 1) {
-    if (current.message === 'DATABASE_UNAVAILABLE' || String(current.code || '').startsWith('08') || ['28P01', '28000', '3D000', 'ECONNREFUSED', 'ENOTFOUND', 'ETIMEDOUT', 'ECONNRESET', 'ERR_TLS_CERT_ALTNAME_INVALID', 'CERT_HAS_EXPIRED', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE'].includes(String(current.code || ''))) return true;
+    if (current.message === 'DATABASE_UNAVAILABLE' || String(current.code || '').startsWith('08') || ['28P01', '28000', '3D000', '53300', '53400', '57P01', '57P02', '57P03', 'ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'ETIMEDOUT', 'ECONNRESET', 'EPIPE', 'ENETUNREACH', 'ERR_TLS_CERT_ALTNAME_INVALID', 'CERT_HAS_EXPIRED', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE'].includes(String(current.code || ''))) return true;
   }
   return false;
 }
 
 export function safeAuthErrorResponse(error, requestId) {
   const headers = requestId ? { 'X-Request-Id': requestId } : undefined;
-  if (error instanceof RangeError || error instanceof TypeError) return { status: 400, body: { error: error.message } };
+  if (error instanceof AuthInputError) return { status: 400, body: { error: error.message, reasonCode: 'INVALID_AUTH_INPUT' }, ...(headers ? { headers } : {}) };
   if (errorHasMigrationSignal(error)) {
     return { status: 503, body: { error: 'Account service setup is incomplete. Please contact support.', reasonCode: 'DATABASE_MIGRATION_REQUIRED' }, ...(headers ? { headers } : {}) };
   }
   if (['DATABASE_NOT_CONFIGURED', 'DATABASE_URL_INVALID', 'DATABASE_NOT_ALLOWED', 'AUTH_RATE_LIMIT_SECRET_NOT_CONFIGURED'].includes(error.message)) {
     return { status: 503, body: { error: 'Account service is temporarily unavailable.', reasonCode: authFailureCategory(error) }, ...(headers ? { headers } : {}) };
   }
-  if (String(error.message).includes('RATE_LIMIT')) return { status: 429, body: { error: 'Too many attempts. Wait a little and try again.' } };
+  if (String(error.message).includes('RATE_LIMIT')) return { status: 429, body: { error: 'Too many attempts. Wait a little and try again.' }, ...(headers ? { headers } : {}) };
   if (errorHasDatabaseAvailabilitySignal(error)) {
     return { status: 503, body: { error: 'Account service is temporarily unavailable.', reasonCode: authFailureCategory(error) }, ...(headers ? { headers } : {}) };
   }
   return { status: 500, body: { error: 'The account service could not complete the request.', reasonCode: 'INTERNAL_AUTH_ERROR' }, ...(headers ? { headers } : {}) };
 }
 
+export function reportAuthFailure(error, requestId, context = 'request') {
+  logAuthFailure(requestId, error, context);
+  return safeAuthErrorResponse(error, requestId);
+}
+
 function logAuthFailure(requestId, error, context = 'request') {
-  console.error(JSON.stringify({ level: 'error', event: 'auth.failure', requestId, context, category: authFailureCategory(error) }));
+  console.error(JSON.stringify({ level: 'error', event: 'auth.failure', requestId, context, reasonCode: authFailureCategory(error) }));
 }
 
 export async function authHealthStatus() {
@@ -324,7 +342,7 @@ async function audit(db, userId, event, requestId) {
       await db.query('INSERT INTO auth_audit_events(user_id,event_type,request_id) VALUES($1,$2,$3)', [userId || null, event, requestId || null]);
       return;
     } catch (error) {
-      if (requiresPostgres()) throw new Error('DATABASE_UNAVAILABLE', { cause: error });
+      if (requiresPostgres()) throw databaseOperationError(error);
       // Fallback to local store
     }
   }
@@ -338,7 +356,7 @@ async function issueSession(db, userId) {
     try {
       await db.query("INSERT INTO customer_sessions(token_hash,user_id,expires_at) VALUES($1,$2,now()+interval '7 days')", [tokenHash, userId]);
     } catch (error) {
-      if (requiresPostgres()) throw new Error('DATABASE_UNAVAILABLE', { cause: error });
+      if (requiresPostgres()) throw databaseOperationError(error);
       // Fallback
     }
   }
@@ -367,7 +385,7 @@ export async function currentUser(req) {
       );
       if (rows[0]) return resolveEffectiveRole(rows[0], process.env.OWNER_EMAIL, rows[0].has_conflicting_owner);
     } catch (error) {
-      if (requiresPostgres()) throw new Error('DATABASE_UNAVAILABLE', { cause: error });
+      if (requiresPostgres()) throw databaseOperationError(error);
       // Fallback
     }
   }
@@ -523,8 +541,8 @@ async function sendEmailCode(user) {
         await db.query("UPDATE email_otp_challenges SET consumed_at=now() WHERE user_id=$1 AND consumed_at IS NULL", [user.id]);
         await db.query("INSERT INTO email_otp_challenges(user_id,code_hmac,expires_at) VALUES($1,$2,now()+interval '10 minutes')", [user.id, hashOtp(code, otpSecret || DEV_FALLBACK_SECRET)]);
       });
-    } catch {
-      if (isProduction()) throw new Error('DATABASE_UNAVAILABLE');
+    } catch (error) {
+      if (isProduction()) throw databaseOperationError(error);
       // Fallback
       await localAuthDb.createEmailChallenge(user.id, hashOtp(code, otpSecret || DEV_FALLBACK_SECRET), code);
     }
@@ -583,8 +601,8 @@ async function sendPhoneCode(user) {
   if (p) {
     try {
       await p.query("INSERT INTO phone_otp_challenges(user_id,provider,phone_e164,expires_at) VALUES($1,$2,$3,now()+interval '10 minutes')", [user.id, isTwilioConfigured ? 'twilio-verify' : 'local-verify', user.mobile_e164]);
-    } catch {
-      if (isProduction()) throw new Error('DATABASE_UNAVAILABLE');
+    } catch (error) {
+      if (isProduction()) throw databaseOperationError(error);
       await localAuthDb.createPhoneChallenge(user.id, user.mobile_e164, code);
     }
   } else {
@@ -623,7 +641,12 @@ async function withDb(work) {
 }
 
 async function signup(req, body, requestId) {
-  const input = validateRegistration(body);
+  let input;
+  try { input = validateRegistration(body); }
+  catch (error) {
+    if (error instanceof RangeError || error instanceof TypeError) throw new AuthInputError(error.message);
+    throw error;
+  }
   if (!await rateAllowed(`signup:ip:${clientIp(req)}`, 10, 60) || !await rateAllowed(`signup:email:${input.email}`, 5, 60) || !await rateAllowed(`signup:mobile:${input.mobile}`, 5, 60)) {
     return genericError(429);
   }
@@ -922,7 +945,7 @@ async function verifyEmail(req, body, requestId) {
         return true;
       });
     } catch (error) {
-      if (requiresPostgres()) throw new Error('DATABASE_UNAVAILABLE', { cause: error });
+      if (requiresPostgres()) throw databaseOperationError(error);
       // Fallback
       outcome = false;
     }
@@ -985,7 +1008,7 @@ async function verifyMobile(req, body, requestId) {
         await audit(db, user.id, 'MOBILE_VERIFIED', requestId);
       });
     } catch (error) {
-      if (requiresPostgres()) throw new Error('DATABASE_UNAVAILABLE', { cause: error });
+      if (requiresPostgres()) throw databaseOperationError(error);
       // Fallback
     }
   }
@@ -1042,7 +1065,7 @@ async function logout(req) {
         const p = await pool();
         if (p) await p.query('DELETE FROM customer_sessions WHERE token_hash=$1', [hashToken(token)]);
       } catch (error) {
-        if (requiresPostgres()) throw new Error('DATABASE_UNAVAILABLE', { cause: error });
+        if (requiresPostgres()) throw databaseOperationError(error);
       }
     }
     await localAuthDb.deleteSession(token);
@@ -1119,7 +1142,6 @@ export async function handleAuth(req, action, body = {}) {
     result.headers = { 'X-Request-Id': requestId, ...(result.headers || {}) };
     return result;
   } catch (error) {
-    logAuthFailure(requestId, error);
-    return safeAuthErrorResponse(error, requestId);
+    return reportAuthFailure(error, requestId);
   }
 }
