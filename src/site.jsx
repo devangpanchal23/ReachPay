@@ -145,9 +145,12 @@ function AuthPage({ mode }) {
   const [user, setUser] = useState(null); const [code, setCode] = useState(''); const [activeChannel, setActiveChannel] = useState('');
   const [signupAttempted, setSignupAttempted] = useState(false); const [loginAttempted, setLoginAttempted] = useState(false);
   const [phoneTools, setPhoneTools] = useState(null);
+  const [resendWait, setResendWait] = useState(0);
+  const [mobileSent, setMobileSent] = useState(false);
   const [signup, setSignup] = useState({ name: '', email: '', country: 'IN', mobile: '', password: '', verificationConsent: false });
   const [login, setLogin] = useState({ identifier: '', password: '' });
   const protectedMode = mode === 'verify';
+  useEffect(() => { if (!resendWait) return undefined; const timer = window.setTimeout(() => setResendWait((value) => Math.max(0, value - 1)), 1000); return () => window.clearTimeout(timer); }, [resendWait]);
   useEffect(() => {
     if (!protectedMode) return;
     authRequest('me', null, 'GET').then((result) => {
@@ -173,7 +176,7 @@ function AuthPage({ mode }) {
   };
   const resend = async (channel) => {
     setBusy(true); setError(''); setMessage('');
-    try { const result = await authRequest('resend', { channel }); setMessage(result.message); }
+    try { const result = await authRequest('resend', { channel }); setMessage(channel === 'mobile' ? 'If the number can receive messages, a new code has been requested.' : result.message); if (channel === 'mobile') setMobileSent(true); setResendWait(60); }
     catch (err) { setError(err.message); } finally { setBusy(false); }
   };
   const quickVerifyAll = async () => {
@@ -243,6 +246,7 @@ function AuthPage({ mode }) {
     </form><p className="auth-switch">New to ReachPay? <a href="/auth/signup">Create an account</a></p></>}
     {mode === 'verify' && <>{!user ? <p className="auth-intro">Loading your verification status…</p> : <><p className="auth-intro">Verify both contact methods. Your account cannot open the dashboard until both are confirmed.</p><div className="verification-methods">
       <div className={`verification-method ${user.emailVerified ? 'verified' : ''}`}><span className="verification-symbol">{user.emailVerified ? '✓' : '1'}</span><div><b>Email address</b><small>{maskEmail(user.email)}</small><span>{user.emailVerified ? 'Verified' : 'Verification required'}</span></div>{!user.emailVerified && <button type="button" disabled={busy} onClick={() => resend('email')}>Resend code</button>}</div>
+      <div className={`verification-method ${user.mobileVerified ? 'verified' : ''}`}><span className="verification-symbol">{user.mobileVerified ? '✓' : '2'}</span><div><b>Mobile number</b><small>{String(user.mobile || '').replace(/(\+\d{1,3})\d+(\d{2})$/, '$1••••••$2')}</small><span>{user.mobileVerified ? 'Verified' : mobileSent ? 'Code requested' : 'Verification required'}</span></div>{!user.mobileVerified && <button type="button" disabled={busy || resendWait > 0} onClick={() => resend('mobile')}>{busy ? 'Sending…' : mobileSent ? 'Resend code' : 'Send code'}</button>}</div>
     </div>{(!user.emailVerified || !user.mobileVerified) && <div className="otp-panel">
       <div className="verification-code-head">
         <label htmlFor="verification-code">Enter verification code</label>
@@ -254,6 +258,7 @@ function AuthPage({ mode }) {
         {!user.mobileVerified && <button className="button secondary" disabled={busy || code.length < 4} onClick={() => verify('mobile')}>{busy && activeChannel === 'mobile' ? 'Checking…' : 'Verify mobile'}</button>}
         {import.meta.env.DEV && <button type="button" className="button secondary dev-verify-all" disabled={busy} onClick={quickVerifyAll}>⚡ Verify all</button>}
       </div>
+      {!user.mobileVerified && <p className="form-message" aria-live="polite">{resendWait > 0 ? `You can request another mobile code in ${resendWait}s.` : 'Mobile code resend is available.'}</p>}
     </div>}{error && <p className="form-message error" role="alert">{error}</p>}{message && <p className="form-message success" role="status">{message}</p>}{user.emailVerified && user.mobileVerified && <a className="button primary" href="/dashboard">Continue to dashboard <ArrowRight size={16}/></a>}</>}</>}
     <a className="auth-back" href="/">← Back to ReachPay</a>
   </div></section>;

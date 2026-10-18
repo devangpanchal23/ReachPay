@@ -14,6 +14,7 @@ if (!process.env.DATABASE_URL) {
     ['customer authentication', new URL('../server/auth-migration.sql', import.meta.url)],
     ['role-based access control', new URL('../database/migrations/002_rbac.sql', import.meta.url)],
     ['owner account bootstrap', new URL('../database/migrations/003_owner_bootstrap.sql', import.meta.url)],
+    ['SMS resend limit support', new URL('../database/migrations/004_sms_resend_limits.sql', import.meta.url)],
   ];
   const pool = new pg.Pool(postgresPoolConfig(process.env.DATABASE_URL, { production: process.env.NODE_ENV === 'production', max: 1, connectionTimeoutMillis: 5000 }));
   const client = await pool.connect();

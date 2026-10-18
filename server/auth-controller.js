@@ -1,7 +1,7 @@
 import process from 'node:process';
 import { randomUUID, createHmac } from 'node:crypto';
 import { clearSessionCookie, hashOtp, hashPassword, hashToken, newEmailOtp, newSessionToken, normalizeEmail, normalizeMobile, parseCookies, safeEqualHex, sessionCookie, validateRegistration, verifyPassword } from './auth-core.js';
-import { checkPhoneOtp, sendPhoneOtp } from './sms/twilio-verify.js';
+import { smsProvider, validateSmsConfiguration } from './sms/twilio-verify.js';
 import { localAuthDb } from './auth-storage.js';
 import { canManageTeam, hasCompletedLoginVerification, memberTransition, resolveEffectiveRole } from './rbac-policy.js';
 import { authEnvironmentStatus, isAllowedDatabaseUrl, parseDatabaseUrl, postgresPoolConfig } from './database-config.js';
@@ -31,6 +31,7 @@ async function autoMigrate(p) {
     const dirname = path.dirname(fileURLToPath(import.meta.url));
     const migrationFiles = [
       'auth-migration.sql',
+      '../database/migrations/004_sms_resend_limits.sql',
       '../database/migrations/002_rbac.sql',
       '../database/migrations/003_owner_bootstrap.sql',
       'pos/pos-migration.sql',
@@ -184,6 +185,8 @@ function authFailureCategory(error) {
   if (messages.includes('SMS_OTP_NOT_CONFIGURED')) return 'sms_otp_not_configured';
   if (messages.includes('EMAIL_DELIVERY_FAILED')) return 'email_delivery_failed';
   if (messages.includes('SMS_DELIVERY_FAILED')) return 'sms_delivery_failed';
+  if (error?.reasonCode && ['SMS_NOT_CONFIGURED','SMS_CREDENTIALS_INVALID','SMS_PROVIDER_ERROR','SMS_NUMBER_NOT_ALLOWED','SMS_RATE_LIMITED','INVALID_PHONE'].includes(error.reasonCode)) return error.reasonCode;
+  if (messages.includes('SMS_CREDENTIALS_INVALID')) return 'SMS_CREDENTIALS_INVALID';
   if (messages.includes('DATABASE_NOT_ALLOWED')) return 'database_target_not_allowed';
   return 'unexpected_auth_failure';
 }
@@ -540,7 +543,9 @@ async function sendEmailCode(user) {
 }
 
 async function sendPhoneCode(user) {
-  const isTwilioConfigured = Boolean(process.env.SMS_PROVIDER === 'twilio-verify' && process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN && process.env.TWILIO_VERIFY_SERVICE_SID);
+  let isTwilioConfigured = false;
+  try { validateSmsConfiguration(); isTwilioConfigured = true; }
+  catch (error) { if (isProduction()) throw error; }
   const code = '123456';
   if (isProduction() && !isTwilioConfigured) throw new Error('SMS_OTP_NOT_CONFIGURED');
 
@@ -558,10 +563,10 @@ async function sendPhoneCode(user) {
 
   if (isTwilioConfigured) {
     try {
-      await sendPhoneOtp(user.mobile_e164);
+      await smsProvider.send(user.mobile_e164);
       return 'sent';
     } catch (err) {
-      if (isProduction()) throw new Error('SMS_DELIVERY_FAILED', { cause: err });
+      if (isProduction()) throw Object.assign(new Error(err.reasonCode || 'SMS_PROVIDER_ERROR'), { reasonCode: err.reasonCode || 'SMS_PROVIDER_ERROR', cause: err });
     }
   }
 
@@ -927,8 +932,9 @@ async function verifyMobile(req, body, requestId) {
 
   if (!approved && isTwilioConfigured) {
     try {
-      approved = await checkPhoneOtp(user.mobile_e164, code);
-    } catch {
+      approved = await smsProvider.verify(user.mobile_e164, code);
+    } catch (error) {
+      if (error.reasonCode) return { status: error.reasonCode === 'SMS_RATE_LIMITED' ? 429 : 503, body: { error: error.reasonCode, reasonCode: error.reasonCode } };
       approved = false;
     }
   }
@@ -975,12 +981,14 @@ async function resend(req, body, requestId) {
   if ((channel === 'email' && user.email_verified_at) || (channel === 'mobile' && user.mobile_verified_at)) return { status: 409, body: { error: 'This contact method is already verified.' } };
   if (!await rateAllowed(`resend-once:${channel}:${user.id}`, 2, 1)) return genericError(429);
   if (!await rateAllowed(`resend:${channel}:${user.id}`, 5, 15)) return genericError(429);
+  if (channel === 'mobile' && (!await rateAllowed(`sms-resend:account:${user.id}`, 5, 1440) || !await rateAllowed(`sms-resend:ip:${clientIp(req)}`, 20, 1440))) return { status: 429, body: { error: 'Please wait before requesting another mobile code.', reasonCode: 'SMS_RATE_LIMITED' } };
   try {
     const delivery = channel === 'email' ? await sendEmailCode(user) : await sendPhoneCode(user);
-    return { status: 202, body: { ok: true, delivery, message: 'A new verification code was sent (use 123456 in dev mode).' } };
+    return { status: 202, body: { ok: true, delivery, message: 'A new verification code was sent.' } };
   } catch (error) {
     logAuthFailure(requestId, error, `${channel}_otp_delivery`);
-    return genericError(503);
+    const reasonCode = error.reasonCode || 'SMS_PROVIDER_ERROR';
+    return { status: reasonCode === 'SMS_RATE_LIMITED' ? 429 : 503, body: { error: reasonCode === 'SMS_RATE_LIMITED' ? 'Please wait before requesting another code.' : 'We could not send a code right now. Please try again later.', reasonCode } };
   }
 }
 

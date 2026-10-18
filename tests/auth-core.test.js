@@ -2,7 +2,15 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { hashOtp, hashPassword, normalizeEmail, normalizeMobile, parseCookies, safeEqualHex, sessionCookie, validateRegistration, verifyPassword } from '../server/auth-core.js';
 import { handleAuth } from '../server/auth-controller.js';
+import { validateSmsConfiguration } from '../server/sms/twilio-verify.js';
 import { cleanNationalInput, emailError, maxNationalDigits, nameError, passwordError, PHONE_COUNTRIES, phoneError } from '../shared/phone-validation.js';
+
+test('Twilio Verify credentials require an AC account SID and reject API key SIDs', () => {
+  const valid = { SMS_PROVIDER: 'twilio-verify', TWILIO_ACCOUNT_SID: `AC${'a'.repeat(32)}`, TWILIO_AUTH_TOKEN: 'private-value', TWILIO_VERIFY_SERVICE_SID: `VA${'b'.repeat(32)}` };
+  assert.equal(validateSmsConfiguration(valid).accountSid, valid.TWILIO_ACCOUNT_SID);
+  assert.throws(() => validateSmsConfiguration({ ...valid, TWILIO_ACCOUNT_SID: `SK${'a'.repeat(32)}` }), { reasonCode: 'SMS_CREDENTIALS_INVALID' });
+  assert.throws(() => validateSmsConfiguration({ ...valid, TWILIO_ACCOUNT_SID: 'not-an-account-sid' }), { reasonCode: 'SMS_CREDENTIALS_INVALID' });
+});
 
 test('normalizes email and phone inputs', () => {
   assert.equal(normalizeEmail('  Person@Example.com '), 'person@example.com');
