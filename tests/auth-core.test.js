@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { hashOtp, hashPassword, normalizeEmail, normalizeMobile, parseCookies, safeEqualHex, sessionCookie, validateRegistration, verifyPassword } from '../server/auth-core.js';
-import { errorHasMigrationSignal, handleAuth, rateAllowed, reportAuthFailure, safeAuthErrorResponse } from '../server/auth-controller.js';
+import { authRequestId, errorHasMigrationSignal, handleAuth, rateAllowed, reportAuthFailure, safeAuthErrorResponse } from '../server/auth-controller.js';
 import { validateSmsConfiguration } from '../server/sms/twilio-verify.js';
 import unavailableFinancialApi from '../api/[...path].js';
 import { cleanNationalInput, emailError, maxNationalDigits, nameError, passwordError, PHONE_COUNTRIES, phoneError } from '../shared/phone-validation.js';
@@ -11,6 +11,12 @@ test('Twilio Verify credentials require an AC account SID and reject API key SID
   assert.equal(validateSmsConfiguration(valid).accountSid, valid.TWILIO_ACCOUNT_SID);
   assert.throws(() => validateSmsConfiguration({ ...valid, TWILIO_ACCOUNT_SID: `SK${'a'.repeat(32)}` }), { reasonCode: 'SMS_CREDENTIALS_INVALID' });
   assert.throws(() => validateSmsConfiguration({ ...valid, TWILIO_ACCOUNT_SID: 'not-an-account-sid' }), { reasonCode: 'SMS_CREDENTIALS_INVALID' });
+});
+
+test('auth request ids are bounded and reject log injection', () => {
+  assert.equal(authRequestId('vercel-trace-123'), 'vercel-trace-123');
+  assert.match(authRequestId('bad-id\nreasonCode=FAKE'), /^[0-9a-f-]{36}$/);
+  assert.match(authRequestId('x'.repeat(101)), /^[0-9a-f-]{36}$/);
 });
 
 test('normalizes email and phone inputs', () => {
@@ -105,19 +111,19 @@ test('unexpected database failures return safe 500 and log only a reason code an
   const entries = [];
   console.error = (...args) => entries.push(args.join(' '));
   try {
-    const raw = Object.assign(new Error('private database detail'), { code: '23505', detail: 'private constraint data' });
+    const raw = Object.assign(new Error('private database detail token=fake-session-token otp=654321 cookie=fake-cookie'), { code: '23505', detail: 'private constraint data' });
     const result = reportAuthFailure(raw, 'unexpected-db-test', 'test_auth_route');
     assert.equal(result.status, 500);
     assert.deepEqual(result.body, { error: 'The account service could not complete the request.', reasonCode: 'INTERNAL_AUTH_ERROR' });
     assert.equal(entries.length, 1);
     assert.match(entries[0], /"requestId":"unexpected-db-test"/);
     assert.match(entries[0], /"reasonCode":"DATABASE_QUERY_FAILED"/);
-    assert.doesNotMatch(entries[0] + JSON.stringify(result), /private database detail|private constraint data|23505/);
+    assert.doesNotMatch(entries[0] + JSON.stringify(result), /private database detail|private constraint data|23505|fake-session-token|654321|fake-cookie/);
   } finally { console.error = oldError; }
 });
 
 test('email-verified mobile-pending login succeeds without valid SMS configuration and stays limited', async () => {
-  const previous = Object.fromEntries(['DATABASE_URL', 'AUTH_REQUIRE_POSTGRES', 'PUBLIC_SITE_URL', 'SMS_PROVIDER', 'TWILIO_ACCOUNT_SID', 'TWILIO_AUTH_TOKEN', 'TWILIO_VERIFY_SERVICE_SID'].map((key) => [key, process.env[key]]));
+  const previous = Object.fromEntries(['DATABASE_URL', 'AUTH_REQUIRE_POSTGRES', 'PUBLIC_SITE_URL', 'OWNER_EMAIL', 'SMS_PROVIDER', 'TWILIO_ACCOUNT_SID', 'TWILIO_AUTH_TOKEN', 'TWILIO_VERIFY_SERVICE_SID'].map((key) => [key, process.env[key]]));
   delete process.env.DATABASE_URL;
   delete process.env.AUTH_REQUIRE_POSTGRES;
   process.env.PUBLIC_SITE_URL = 'http://localhost:5173';
@@ -127,6 +133,7 @@ test('email-verified mobile-pending login succeeds without valid SMS configurati
   process.env.TWILIO_VERIFY_SERVICE_SID = 'invalid-service-sid';
   const suffix = `${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
   const email = `partial_${suffix}@example.test`;
+  process.env.OWNER_EMAIL = email;
   const password = 'a-safe-regression-password';
   const headers = { origin: 'http://localhost:5173', host: 'localhost:5173' };
   try {

@@ -36,7 +36,7 @@ if (!process.env.DATABASE_URL) {
       client.release();
     }
   } catch (error) {
-    process.stderr.write(`[ReachPay POS DB] Migration failed: ${error.message}. Check PostgreSQL connectivity, permissions, and schema compatibility.\n`);
+    process.stderr.write(`[ReachPay POS DB] Migration failed${error?.code ? ` (PostgreSQL ${error.code})` : ''}. Check PostgreSQL connectivity, permissions, and schema compatibility.\n`);
     process.exitCode = 1;
   } finally {
     await pool.end();

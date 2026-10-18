@@ -17,6 +17,10 @@ function isPostgresConfigured() {
 const isProduction = () => process.env.NODE_ENV === 'production';
 const requiresPostgres = () => isProduction() || process.env.AUTH_REQUIRE_POSTGRES === 'true';
 
+export function authRequestId(value) {
+  return typeof value === 'string' && /^[A-Za-z0-9._:-]{1,100}$/.test(value) ? value : randomUUID();
+}
+
 let poolPromise;
 let migrationPromise;
 let poolAvailable = null;
@@ -62,12 +66,12 @@ async function autoMigrate(p) {
           } else await p.query(sql);
           console.log(`[ReachPay DB] Schema verified: ${rel}`);
         } catch (mErr) {
-          console.warn(`[ReachPay DB] Schema migration notice (${rel}):`, mErr.message);
+          console.warn(JSON.stringify({ level: 'warn', event: 'database.schema_migration_notice', migration: rel, reasonCode: authFailureCategory(mErr) }));
         }
       }
     }
   } catch (err) {
-    console.warn('[ReachPay DB] Auto-migrate check warning:', err.message);
+    console.warn(JSON.stringify({ level: 'warn', event: 'database.auto_migrate_warning', reasonCode: authFailureCategory(err) }));
   } finally {
     if (migrationLock) {
       await migrationLock.query("SELECT pg_advisory_unlock(hashtext('reachpay.schema.auto_migrate'))").catch(() => {});
@@ -80,8 +84,9 @@ async function createPool(connectionString) {
   const { Pool } = await import('pg');
   const p = new Pool(postgresPoolConfig(connectionString, {
     production: isProduction(),
-    max: 8,
-    idleTimeoutMillis: 30_000,
+    // Keep each warm Vercel function to one client connection; Neon pooling is upstream.
+    max: isProduction() ? 1 : 8,
+    idleTimeoutMillis: isProduction() ? 10_000 : 30_000,
     connectionTimeoutMillis: 3_000,
   }));
   p.on('error', (err) => {
@@ -1086,7 +1091,7 @@ function canonicalAction(raw) {
 }
 
 export async function handleAuth(req, action, body = {}) {
-  const requestId = req.headers?.['x-request-id'] || randomUUID();
+  const requestId = authRequestId(req.headers?.['x-request-id']);
   const act = canonicalAction(action);
   const method = req.method ? req.method.toUpperCase() : 'GET';
 

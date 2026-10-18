@@ -1,7 +1,7 @@
 import process from 'node:process';
 import { readFile } from 'node:fs/promises';
 import pg from 'pg';
-import { databaseNameFromUrl, isAllowedDatabaseUrl, postgresPoolConfig } from '../server/database-config.js';
+import { isAllowedDatabaseUrl, postgresPoolConfig } from '../server/database-config.js';
 
 if (!process.env.DATABASE_URL) {
   process.stderr.write('DATABASE_URL is required to apply ReachPay schemas.\n');
@@ -18,19 +18,20 @@ if (!process.env.DATABASE_URL) {
     ['Auth rate-limit key uniqueness', new URL('../database/migrations/005_auth_rate_limit_key_unique.sql', import.meta.url)],
   ];
   const pool = new pg.Pool(postgresPoolConfig(process.env.DATABASE_URL, { production: process.env.NODE_ENV === 'production', max: 1, connectionTimeoutMillis: 5000 }));
-  const client = await pool.connect();
+  let client;
   try {
+    client = await pool.connect();
     await client.query('BEGIN');
     await client.query("SELECT set_config('reachpay.owner_email', $1, true)", [String(process.env.OWNER_EMAIL || '').trim()]);
     for (const [name, path] of migrations) {
       await client.query(await readFile(path, 'utf8'));
-      process.stdout.write(`Applied ${name} schema to ${databaseNameFromUrl(process.env.DATABASE_URL)}.\n`);
+      process.stdout.write(`Applied ${name} schema.\n`);
     }
     await client.query('COMMIT');
     process.stdout.write('ReachPay customer authentication schema is ready.\n');
   } catch (error) {
-    await client.query('ROLLBACK');
+    if (client) await client.query('ROLLBACK').catch(() => {});
     process.stderr.write(`ReachPay schema migration failed${error?.code ? ` (PostgreSQL ${error.code})` : ''}. Check database connectivity, PostgreSQL version, and migration permissions.\n`);
     process.exitCode = 1;
-  } finally { client.release(); await pool.end(); }
+  } finally { client?.release(); await pool.end(); }
 }

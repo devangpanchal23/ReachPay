@@ -75,6 +75,8 @@ const canUseIsolatedPg = (() => {
   try { return /test/i.test(new URL(isolatedPgUrl).pathname); } catch { return false; }
 })();
 test('PostgreSQL transaction, settlement persistence, webhook concurrency, rollback, and recovery', { skip: !canUseIsolatedPg && 'Set REACHPAY_TEST_DATABASE_URL to an isolated database with test in its name.' }, async () => {
+  const previousDatabaseUrl = process.env.DATABASE_URL;
+  try {
   process.env.DATABASE_URL = isolatedPgUrl;
   const { posStorage: isolatedStorage } = await import('../server/pos/pos-storage.js');
   const merchantTxnId = `RP_${randomUUID()}`;
@@ -112,4 +114,8 @@ test('PostgreSQL transaction, settlement persistence, webhook concurrency, rollb
   ]);
   assert.equal(concurrentResults.filter((value) => value.ignoredTransition).length, 1);
   assert.ok(['SUCCESS', 'FAILED'].includes((await isolatedStorage.getTransactionByMerchantTxnId(concurrentTxnId)).status));
+  } finally {
+    if (previousDatabaseUrl === undefined) delete process.env.DATABASE_URL;
+    else process.env.DATABASE_URL = previousDatabaseUrl;
+  }
 });

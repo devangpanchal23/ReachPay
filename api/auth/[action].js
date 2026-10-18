@@ -1,8 +1,7 @@
-import { randomUUID } from 'node:crypto';
-import { handleAuth, reportAuthFailure } from '../../server/auth-controller.js';
+import { authRequestId, handleAuth, reportAuthFailure } from '../../server/auth-controller.js';
 
 export default async function auth(request, response) {
-  const requestId = request.headers?.['x-request-id'] || randomUUID();
+  const requestId = authRequestId(request.headers?.['x-request-id']);
   try {
     response.setHeader('X-Content-Type-Options', 'nosniff');
     response.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
@@ -14,7 +13,8 @@ export default async function auth(request, response) {
     if (request.method === 'POST' && !String(request.headers?.['content-type'] || '').toLowerCase().startsWith('application/json')) return response.status(415).json({ error: 'JSON content type is required.' });
     const action = String(request.query?.action || request.url?.split('?')[0].split('/').filter(Boolean).at(-1) || '');
     const body = request.body && typeof request.body === 'object' ? request.body : {};
-    const result = await handleAuth(request, action, body);
+    const authRequest = { ...request, headers: { ...request.headers, 'x-request-id': requestId } };
+    const result = await handleAuth(authRequest, action, body);
     for (const [name, value] of Object.entries(result.headers || {})) response.setHeader(name, value);
     return response.status(result.status).json(result.body);
   } catch (error) {

@@ -17,10 +17,11 @@ export function resolveEffectiveRole(user, ownerEmail, hasConflictingOwner = fal
   const configuredEmail = String(ownerEmail || '').trim().toLowerCase();
   const accountEmail = String(user.email || '').trim().toLowerCase();
   if (!user.email_verified_at || !user.mobile_verified_at) return { ...user, role: 'limited', access_status: 'limited' };
+  const storedOwnerIsProtected = user.role === 'owner' && accountEmail && user.status === 'ACTIVE' && !hasConflictingOwner;
+  if (storedOwnerIsProtected) return { ...user, role: 'owner', access_status: 'approved' };
   const verifiedOwner = Boolean(configuredEmail && accountEmail === configuredEmail && user.email_verified_at && user.status === 'ACTIVE');
-  const storedOwnerIsConfigured = user.role !== 'owner' || accountEmail === configuredEmail;
 
-  if (verifiedOwner && storedOwnerIsConfigured && !hasConflictingOwner) {
+  if (verifiedOwner && !hasConflictingOwner) {
     return { ...user, role: 'owner', access_status: 'approved' };
   }
   if (user.role === 'owner') return { ...user, role: 'limited', access_status: 'limited' };

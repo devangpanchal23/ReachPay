@@ -38,12 +38,22 @@ test('configured verified owner resolves on each request without a membership ap
   }
 });
 
+test('the unique stored owner retains access if OWNER_EMAIL is missing or changed', () => {
+  for (const configuredEmail of ['', 'new-owner@example.test']) {
+    const resolved = resolveEffectiveRole({ ...owner, email: 'current-owner@example.test' }, configuredEmail, false);
+    assert.equal(resolved.role, 'owner');
+    assert.equal(hasTransactionAccess(resolved), true);
+    assert.equal(canManageTeam(resolved), true);
+  }
+  assert.equal(resolveEffectiveRole({ ...owner, email: 'current-owner@example.test' }, '', true).role, 'limited');
+});
+
 test('unverified, conflicting, non-owner, pending, revoked, and limited accounts cannot gain transaction access', () => {
   const account = { ...owner, email: 'devangpan23@gmail.com', email_verified_at: 'verified' };
   const blocked = [
     resolveEffectiveRole({ ...account, email_verified_at: null }, 'devangpan23@gmail.com'),
     resolveEffectiveRole(account, 'devangpan23@gmail.com', true),
-    resolveEffectiveRole({ ...account, email: 'other@example.com' }, 'devangpan23@gmail.com'),
+    resolveEffectiveRole({ ...account, email: 'other@example.com' }, 'devangpan23@gmail.com', true),
     resolveEffectiveRole({ ...member, email: 'member@example.com', access_status: 'pending' }, 'devangpan23@gmail.com'),
     resolveEffectiveRole({ ...member, email: 'member@example.com', role: 'limited', access_status: 'revoked' }, 'devangpan23@gmail.com'),
     resolveEffectiveRole({ ...member, email: 'member@example.com', role: 'limited' }, 'devangpan23@gmail.com'),
@@ -54,7 +64,7 @@ test('unverified, conflicting, non-owner, pending, revoked, and limited accounts
       assert.equal(canOpenTransactionPath(path, user), false);
     }
   }
-  assert.equal(resolveEffectiveRole(account, '', false).role, 'limited');
+  assert.equal(resolveEffectiveRole(account, '', false).role, 'owner');
   const mobilePendingOwner = resolveEffectiveRole({ ...account, mobile_verified_at: null }, 'devangpan23@gmail.com');
   assert.equal(mobilePendingOwner.role, 'limited');
   assert.equal(canManageTeam(mobilePendingOwner), false);

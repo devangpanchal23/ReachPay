@@ -1,12 +1,11 @@
 import { readFile } from 'node:fs/promises';
 import pg from 'pg';
-import { databaseNameFromUrl, isAllowedDatabaseUrl, postgresPoolConfig } from '../server/database-config.js';
+import { isAllowedDatabaseUrl, postgresPoolConfig } from '../server/database-config.js';
 
 if (!process.env.DATABASE_URL) {
   process.stderr.write('[ReachPay beneficiary DB] DATABASE_URL is required.\n');
   process.exitCode = 1;
 } else {
-  const database = databaseNameFromUrl(process.env.DATABASE_URL);
   if (!isAllowedDatabaseUrl(process.env.DATABASE_URL)) {
     process.stderr.write('[ReachPay beneficiary DB] Refusing to migrate this database target. Use a ReachPay database or a Neon PostgreSQL endpoint.\n');
     process.exitCode = 1;
@@ -24,7 +23,7 @@ if (!process.env.DATABASE_URL) {
       }
       const sql = await readFile(new URL('../server/financial/beneficiary-migration.sql', import.meta.url), 'utf8');
       await pool.query(sql);
-      process.stdout.write(`[ReachPay beneficiary DB] Beneficiary schema applied to ${database}.\n`);
+      process.stdout.write('[ReachPay beneficiary DB] Beneficiary schema applied.\n');
     } catch (error) {
       const reason = error.message === 'EXISTING_BENEFICIARY_SCHEMA_REQUIRES_REVIEW' ? error.message : (error.code || 'unknown error');
       process.stderr.write(`[ReachPay beneficiary DB] Migration failed (${reason}).\n`);
