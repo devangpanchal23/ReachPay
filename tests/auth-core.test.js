@@ -1,8 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { hashOtp, hashPassword, normalizeEmail, normalizeMobile, parseCookies, safeEqualHex, sessionCookie, validateRegistration, verifyPassword } from '../server/auth-core.js';
-import { handleAuth } from '../server/auth-controller.js';
+import { errorHasMigrationSignal, handleAuth, rateAllowed, safeAuthErrorResponse } from '../server/auth-controller.js';
 import { validateSmsConfiguration } from '../server/sms/twilio-verify.js';
+import unavailableFinancialApi from '../api/[...path].js';
 import { cleanNationalInput, emailError, maxNationalDigits, nameError, passwordError, PHONE_COUNTRIES, phoneError } from '../shared/phone-validation.js';
 
 test('Twilio Verify credentials require an AC account SID and reject API key SIDs', () => {
@@ -76,12 +77,88 @@ test('auth mutations fail closed when PostgreSQL is explicitly required and not 
       name: 'Example User', email: 'example@example.com', mobile: '9876543210', password: 'a-long-password-1', verificationConsent: true
     });
     assert.equal(result.status, 503);
-    assert.equal(result.body.error, 'Account setup is incomplete. Please contact the administrator.');
+    assert.equal(result.body.error, 'Account service is temporarily unavailable.');
     assert.equal(result.headers['X-Request-Id'].length > 0, true);
   } finally {
     if (previousReq === undefined) delete process.env.AUTH_REQUIRE_POSTGRES; else process.env.AUTH_REQUIRE_POSTGRES = previousReq;
     if (previousUrl === undefined) delete process.env.DATABASE_URL; else process.env.DATABASE_URL = previousUrl;
     if (previousOrigin === undefined) delete process.env.PUBLIC_SITE_URL; else process.env.PUBLIC_SITE_URL = previousOrigin;
+  }
+});
+
+test('wrapped PostgreSQL missing table and column failures are identified as migration errors', () => {
+  assert.equal(errorHasMigrationSignal(Object.assign(new Error('missing relation'), { code: '42P01' })), true);
+  assert.equal(errorHasMigrationSignal(new Error('DATABASE_UNAVAILABLE', { cause: Object.assign(new Error('missing column'), { code: '42703' }) })), true);
+  assert.equal(errorHasMigrationSignal(Object.assign(new Error('connection timeout'), { code: 'ETIMEDOUT' })), false);
+  const response = safeAuthErrorResponse(new Error('DATABASE_UNAVAILABLE', { cause: Object.assign(new Error('missing relation'), { code: '42P01' }) }), 'migration-test');
+  assert.equal(response.status, 503);
+  assert.equal(response.body.reasonCode, 'DATABASE_MIGRATION_REQUIRED');
+  assert.equal(response.headers['X-Request-Id'], 'migration-test');
+  assert.doesNotMatch(JSON.stringify(response), /missing relation|42P01/);
+});
+
+test('email-verified mobile-pending login succeeds without valid SMS configuration and stays limited', async () => {
+  const previous = Object.fromEntries(['DATABASE_URL', 'AUTH_REQUIRE_POSTGRES', 'PUBLIC_SITE_URL', 'SMS_PROVIDER', 'TWILIO_ACCOUNT_SID', 'TWILIO_AUTH_TOKEN', 'TWILIO_VERIFY_SERVICE_SID'].map((key) => [key, process.env[key]]));
+  delete process.env.DATABASE_URL;
+  delete process.env.AUTH_REQUIRE_POSTGRES;
+  process.env.PUBLIC_SITE_URL = 'http://localhost:5173';
+  process.env.SMS_PROVIDER = 'twilio-verify';
+  process.env.TWILIO_ACCOUNT_SID = 'invalid-account-sid';
+  process.env.TWILIO_AUTH_TOKEN = 'invalid-test-token';
+  process.env.TWILIO_VERIFY_SERVICE_SID = 'invalid-service-sid';
+  const suffix = `${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
+  const email = `partial_${suffix}@example.test`;
+  const password = 'a-safe-regression-password';
+  const headers = { origin: 'http://localhost:5173', host: 'localhost:5173' };
+  try {
+    const created = await handleAuth({ method: 'POST', headers, socket: { remoteAddress: `198.51.100.${Math.floor(Math.random() * 200) + 1}` } }, 'signup', {
+      name: 'Partial Verification', email, mobile: `9${String(Date.now()).slice(-9)}`, password, verificationConsent: true,
+    });
+    assert.equal(created.status, 201);
+    const cookie = created.headers['Set-Cookie'].split(';')[0];
+    const verifiedEmail = await handleAuth({ method: 'POST', headers: { ...headers, cookie }, socket: { remoteAddress: '198.51.100.12' } }, 'verify-email', { code: '123456' });
+    assert.equal(verifiedEmail.status, 200);
+    const login = await handleAuth({ method: 'POST', headers, socket: { remoteAddress: '198.51.100.13' } }, 'login', { identifier: email, password });
+    assert.equal(login.status, 200);
+    assert.equal(login.body.next, '/auth/verify');
+    assert.equal(login.body.user.emailVerified, true);
+    assert.equal(login.body.user.mobileVerified, false);
+    assert.ok(login.headers['Set-Cookie']);
+    const loginCookie = login.headers['Set-Cookie'].split(';')[0];
+    const me = await handleAuth({ method: 'GET', headers: { ...headers, cookie: loginCookie }, socket: { remoteAddress: '198.51.100.13' } }, 'me');
+    assert.equal(me.status, 200);
+    assert.equal(me.body.dashboardAllowed, false);
+    assert.equal(me.body.user.role, 'limited');
+    const financialResponse = { setHeader() { return this; }, status(code) { this.statusCode = code; return this; }, json(body) { this.body = body; return this; } };
+    await unavailableFinancialApi({ method: 'GET', headers: { cookie: loginCookie } }, financialResponse);
+    assert.equal(financialResponse.statusCode, 403);
+    const logout = await handleAuth({ method: 'POST', headers: { ...headers, cookie: loginCookie }, socket: { remoteAddress: '198.51.100.13' } }, 'logout');
+    assert.equal(logout.status, 200);
+    assert.match(logout.headers['Set-Cookie'], /Max-Age=0/);
+    delete process.env.SMS_PROVIDER;
+    delete process.env.TWILIO_ACCOUNT_SID;
+    delete process.env.TWILIO_AUTH_TOKEN;
+    delete process.env.TWILIO_VERIFY_SERVICE_SID;
+    const noSmsLogin = await handleAuth({ method: 'POST', headers, socket: { remoteAddress: '198.51.100.14' } }, 'login', { identifier: email, password });
+    assert.equal(noSmsLogin.status, 200);
+    assert.equal(noSmsLogin.body.next, '/auth/verify');
+  } finally {
+    for (const [key, value] of Object.entries(previous)) value === undefined ? delete process.env[key] : process.env[key] = value;
+  }
+});
+
+test('login returns 429 when its shared IP limit is exhausted', async () => {
+  const previous = Object.fromEntries(['DATABASE_URL', 'AUTH_REQUIRE_POSTGRES', 'PUBLIC_SITE_URL'].map((key) => [key, process.env[key]]));
+  delete process.env.DATABASE_URL;
+  delete process.env.AUTH_REQUIRE_POSTGRES;
+  process.env.PUBLIC_SITE_URL = 'http://localhost:5173';
+  const ip = `198.51.100.${Math.floor(Math.random() * 200) + 1}`;
+  try {
+    for (let attempt = 0; attempt < 500; attempt += 1) assert.equal(await rateAllowed(`login:ip:${ip}`, 500, 15), true);
+    const result = await handleAuth({ method: 'POST', headers: { origin: 'http://localhost:5173', host: 'localhost:5173' }, socket: { remoteAddress: ip } }, 'login', { identifier: 'rate-limit@example.test', password: 'test-password' });
+    assert.equal(result.status, 429);
+  } finally {
+    for (const [key, value] of Object.entries(previous)) value === undefined ? delete process.env[key] : process.env[key] = value;
   }
 });
 

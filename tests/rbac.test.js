@@ -6,10 +6,10 @@ import unavailableFinancialApi from '../api/[...path].js';
 import { isTransactionPath, canOpenTeamAccessPage, canOpenTransactionPath } from '../src/route-access.js';
 import { readFile } from 'node:fs/promises';
 
-const owner = { status: 'ACTIVE', role: 'owner', access_status: 'approved' };
-const member = { status: 'ACTIVE', role: 'approved_member', access_status: 'approved' };
+const owner = { status: 'ACTIVE', role: 'owner', access_status: 'approved', email_verified_at: 'verified', mobile_verified_at: 'verified' };
+const member = { status: 'ACTIVE', role: 'approved_member', access_status: 'approved', email_verified_at: 'verified', mobile_verified_at: 'verified' };
 
-test('transaction access is restricted to active owners and approved members', () => {
+test('transaction access requires both verifications and an active approved role', () => {
   assert.equal(hasTransactionAccess(owner), true);
   assert.equal(hasTransactionAccess({ ...owner, access_status: 'pending' }), true);
   assert.equal(hasTransactionAccess(member), true);
@@ -21,6 +21,8 @@ test('transaction access is restricted to active owners and approved members', (
     { ...member, role: 'administrator' },
     { ...owner, status: 'LOCKED' },
   ]) assert.equal(hasTransactionAccess(user), false);
+  assert.equal(hasTransactionAccess({ ...owner, mobile_verified_at: null }), false);
+  assert.equal(canManageTeam({ ...owner, mobile_verified_at: null }), false);
 });
 
 test('configured verified owner resolves on each request without a membership approval state', () => {
@@ -53,6 +55,10 @@ test('unverified, conflicting, non-owner, pending, revoked, and limited accounts
     }
   }
   assert.equal(resolveEffectiveRole(account, '', false).role, 'limited');
+  const mobilePendingOwner = resolveEffectiveRole({ ...account, mobile_verified_at: null }, 'devangpan23@gmail.com');
+  assert.equal(mobilePendingOwner.role, 'limited');
+  assert.equal(canManageTeam(mobilePendingOwner), false);
+  assert.equal(hasTransactionAccess(mobilePendingOwner), false);
   assert.equal(canOpenTeamAccessPage(blocked[0]), false);
 });
 

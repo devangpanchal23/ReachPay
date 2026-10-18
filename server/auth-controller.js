@@ -175,11 +175,11 @@ function authFailureCategory(error) {
   const codes = errors.map((entry) => String(entry?.code || ''));
   if (messages.includes('DATABASE_NOT_CONFIGURED')) return 'database_not_configured';
   if (messages.includes('DATABASE_URL_INVALID')) return 'database_url_invalid';
-  if (messages.includes('DATABASE_UNAVAILABLE')) return 'database_unavailable';
-  if (messages.includes('AUTH_RATE_LIMIT_SECRET_NOT_CONFIGURED')) return 'rate_limit_secret_not_configured';
+  if (messages.includes('DATABASE_MIGRATION_REQUIRED') || codes.some((code) => ['42P01', '42703'].includes(code))) return 'DATABASE_MIGRATION_REQUIRED';
   if (codes.some((code) => ['28P01', '28000'].includes(code))) return 'database_credentials_rejected';
   if (codes.includes('3D000')) return 'database_not_found';
-  if (codes.some((code) => ['42P01', '42703'].includes(code))) return 'database_migration_required';
+  if (messages.includes('DATABASE_UNAVAILABLE')) return 'database_unavailable';
+  if (messages.includes('AUTH_RATE_LIMIT_SECRET_NOT_CONFIGURED')) return 'rate_limit_secret_not_configured';
   if (codes.some((code) => code.startsWith('08') || ['ECONNREFUSED', 'ENOTFOUND', 'ETIMEDOUT', 'ECONNRESET', 'ERR_TLS_CERT_ALTNAME_INVALID', 'CERT_HAS_EXPIRED', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE'].includes(code))) return 'database_unavailable';
   if (messages.includes('EMAIL_OTP_NOT_CONFIGURED')) return 'email_otp_not_configured';
   if (messages.includes('SMS_OTP_NOT_CONFIGURED')) return 'sms_otp_not_configured';
@@ -189,6 +189,36 @@ function authFailureCategory(error) {
   if (messages.includes('SMS_CREDENTIALS_INVALID')) return 'SMS_CREDENTIALS_INVALID';
   if (messages.includes('DATABASE_NOT_ALLOWED')) return 'database_target_not_allowed';
   return 'unexpected_auth_failure';
+}
+
+export function errorHasMigrationSignal(error) {
+  for (let current = error, depth = 0; current && depth < 5; current = current.cause, depth += 1) {
+    if (['42P01', '42703'].includes(String(current.code || '')) || current.message === 'DATABASE_MIGRATION_REQUIRED') return true;
+  }
+  return false;
+}
+
+function errorHasDatabaseAvailabilitySignal(error) {
+  for (let current = error, depth = 0; current && depth < 5; current = current.cause, depth += 1) {
+    if (current.message === 'DATABASE_UNAVAILABLE' || String(current.code || '').startsWith('08') || ['28P01', '28000', '3D000', 'ECONNREFUSED', 'ENOTFOUND', 'ETIMEDOUT', 'ECONNRESET', 'ERR_TLS_CERT_ALTNAME_INVALID', 'CERT_HAS_EXPIRED', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE'].includes(String(current.code || ''))) return true;
+  }
+  return false;
+}
+
+export function safeAuthErrorResponse(error, requestId) {
+  const headers = requestId ? { 'X-Request-Id': requestId } : undefined;
+  if (error instanceof RangeError || error instanceof TypeError) return { status: 400, body: { error: error.message } };
+  if (errorHasMigrationSignal(error)) {
+    return { status: 503, body: { error: 'Account service setup is incomplete. Please contact support.', reasonCode: 'DATABASE_MIGRATION_REQUIRED' }, ...(headers ? { headers } : {}) };
+  }
+  if (['DATABASE_NOT_CONFIGURED', 'DATABASE_URL_INVALID', 'DATABASE_NOT_ALLOWED', 'AUTH_RATE_LIMIT_SECRET_NOT_CONFIGURED'].includes(error.message)) {
+    return { status: 503, body: { error: 'Account service is temporarily unavailable.', reasonCode: authFailureCategory(error) }, ...(headers ? { headers } : {}) };
+  }
+  if (String(error.message).includes('RATE_LIMIT')) return { status: 429, body: { error: 'Too many attempts. Wait a little and try again.' } };
+  if (errorHasDatabaseAvailabilitySignal(error)) {
+    return { status: 503, body: { error: 'Account service is temporarily unavailable.', reasonCode: authFailureCategory(error) }, ...(headers ? { headers } : {}) };
+  }
+  return { status: 500, body: { error: 'The account service could not complete the request.', reasonCode: 'INTERNAL_AUTH_ERROR' }, ...(headers ? { headers } : {}) };
 }
 
 function logAuthFailure(requestId, error, context = 'request') {
@@ -809,7 +839,7 @@ async function login(req, body, requestId) {
         if (!passwordMatches) {
           return { status: 401, body: { error: 'Incorrect email/mobile number or password. Please check your credentials.' } };
         }
-        await withDb(async (db) => promoteVerifiedOwner(db, user.id));
+        if (user.email_verified_at && user.mobile_verified_at) await withDb(async (db) => promoteVerifiedOwner(db, user.id));
         user = resolveEffectiveRole(user, process.env.OWNER_EMAIL, user.has_conflicting_owner);
         token = await withDb(async (db) => {
           const session = await issueSession(db, user.id);
@@ -835,7 +865,7 @@ async function login(req, body, requestId) {
     if (!passwordMatches) {
       return { status: 401, body: { error: 'Incorrect email/mobile number or password. Please check your credentials.' } };
     }
-    await localAuthDb.promoteConfiguredOwner(user.id);
+    if (user.email_verified_at && user.mobile_verified_at) await localAuthDb.promoteConfiguredOwner(user.id);
     const store = localAuthDb.getStore();
     const conflict = store.accounts.some((account) => account.role === 'owner' && account.id !== user.id);
     user = resolveEffectiveRole(user, process.env.OWNER_EMAIL, conflict);
@@ -1089,12 +1119,7 @@ export async function handleAuth(req, action, body = {}) {
     result.headers = { 'X-Request-Id': requestId, ...(result.headers || {}) };
     return result;
   } catch (error) {
-    if (error instanceof RangeError || error instanceof TypeError) return { status: 400, body: { error: error.message } };
     logAuthFailure(requestId, error);
-    if (['DATABASE_NOT_CONFIGURED', 'AUTH_RATE_LIMIT_SECRET_NOT_CONFIGURED'].includes(error.message)) {
-      return { status: 503, body: { error: 'Account setup is incomplete. Please contact the administrator.' }, headers: { 'X-Request-Id': requestId } };
-    }
-    if (String(error.message).includes('RATE_LIMIT')) return genericError(429);
-    return { ...genericError(503), headers: { 'X-Request-Id': requestId } };
+    return safeAuthErrorResponse(error, requestId);
   }
 }

@@ -1,23 +1,22 @@
 export function hasTransactionAccess(user) {
-  if (!user || user.status !== 'ACTIVE') return false;
+  if (!user || user.status !== 'ACTIVE' || !user.email_verified_at || !user.mobile_verified_at) return false;
   if (user.role === 'owner') return true;
   return user.role === 'approved_member' && user.access_status === 'approved';
 }
 
 export function canManageTeam(user) {
-  return Boolean(user && user.status === 'ACTIVE' && user.role === 'owner');
+  return Boolean(user && user.status === 'ACTIVE' && user.email_verified_at && user.mobile_verified_at && user.role === 'owner');
 }
 
 export function hasCompletedLoginVerification(user) {
-  if (!user || user.status !== 'ACTIVE' || !user.email_verified_at) return false;
-  if (user.role === 'owner') return Boolean(user.mobile_verified_at);
-  return Boolean(user.mobile_verified_at || ['pending', 'approved', 'revoked'].includes(user.access_status));
+  return Boolean(user && user.status === 'ACTIVE' && user.email_verified_at && user.mobile_verified_at);
 }
 
 export function resolveEffectiveRole(user, ownerEmail, hasConflictingOwner = false) {
   if (!user) return null;
   const configuredEmail = String(ownerEmail || '').trim().toLowerCase();
   const accountEmail = String(user.email || '').trim().toLowerCase();
+  if (!user.email_verified_at || !user.mobile_verified_at) return { ...user, role: 'limited', access_status: 'limited' };
   const verifiedOwner = Boolean(configuredEmail && accountEmail === configuredEmail && user.email_verified_at && user.status === 'ACTIVE');
   const storedOwnerIsConfigured = user.role !== 'owner' || accountEmail === configuredEmail;
 

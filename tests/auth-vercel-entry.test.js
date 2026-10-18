@@ -34,7 +34,7 @@ test('Vercel auth action forwards parsed POST JSON to signup and preserves reque
   try {
     await auth(request, response);
     assert.equal(statusCode, 503);
-    assert.equal(payload.error, 'Account setup is incomplete. Please contact the administrator.');
+    assert.equal(payload.error, 'Account service is temporarily unavailable.');
     assert.equal(headers['X-Request-Id'], 'safe-test-request');
     assert.match(errorLogs.join(' '), /"category":"database_not_configured"/);
     assert.doesNotMatch(errorLogs.join(' '), /a-safe-test-password|user@example\.test/);

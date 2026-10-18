@@ -8,6 +8,7 @@
     "start": "node --env-file-if-exists=.env server/index.js",
     "server": "node --env-file-if-exists=.env server/index.js",
     "db:check": "node --env-file-if-exists=.env scripts/check-auth-db.js",
+    "db:check:auth-schema": "node --env-file-if-exists=.env scripts/check-auth-schema.js",
     "db:migrate": "node --env-file-if-exists=.env scripts/migrate-auth.js",
     "db:migrate:auth": "node --env-file-if-exists=.env scripts/migrate-auth.js",
     "db:migrate:pos": "node --env-file-if-exists=.env scripts/migrate-pos.js",
