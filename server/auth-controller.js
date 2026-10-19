@@ -4,15 +4,17 @@ import { clearSessionCookie, hashOtp, hashPassword, hashToken, newEmailOtp, newS
 import { smsProvider, validateSmsConfiguration } from './sms/twilio-verify.js';
 import { localAuthDb } from './auth-storage.js';
 import { canManageTeam, hasCompletedLoginVerification, memberTransition, resolveEffectiveRole } from './rbac-policy.js';
-import { authEnvironmentStatus, isAllowedDatabaseUrl, parseDatabaseUrl, postgresPoolConfig } from './database-config.js';
+import { authEnvironmentStatus, databaseConnectionString, isAllowedDatabaseUrl, parseDatabaseUrl, postgresPoolConfig } from './database-config.js';
 
 const DEV_FALLBACK_SECRET = 'reachpay_development_auth_secret_key_at_least_32_bytes_long_fallback';
 
 class AuthInputError extends Error {}
 
 function isPostgresConfigured() {
-  return Boolean(process.env.DATABASE_URL && process.env.DATABASE_URL.trim().length > 0);
+  return Boolean(databaseConnectionString());
 }
+
+const databaseUrl = () => databaseConnectionString();
 
 const isProduction = () => process.env.NODE_ENV === 'production' || Boolean(process.env.VERCEL);
 const requiresPostgres = () => isProduction() || process.env.AUTH_REQUIRE_POSTGRES === 'true';
@@ -111,13 +113,14 @@ async function pool() {
   if (poolAvailable === false && !requiresPostgres()) {
     return null;
   }
-  const databaseTarget = parseDatabaseUrl(process.env.DATABASE_URL);
+  const connectionString = databaseUrl();
+  const databaseTarget = parseDatabaseUrl(connectionString);
   if (!databaseTarget) {
     if (requiresPostgres()) throw new Error('DATABASE_URL_INVALID');
     poolAvailable = false;
     return null;
   }
-  if (!isAllowedDatabaseUrl(process.env.DATABASE_URL)) {
+  if (!isAllowedDatabaseUrl(connectionString)) {
     if (requiresPostgres()) throw new Error('DATABASE_NOT_ALLOWED');
     poolAvailable = false;
     return null;
@@ -125,18 +128,18 @@ async function pool() {
   if (!poolPromise) {
     poolPromise = (async () => {
       try {
-        let activeConnString = process.env.DATABASE_URL;
+        let activeConnString = connectionString;
         let p = await createPool(activeConnString);
         try {
           await p.query('SELECT 1');
           poolAvailable = true;
           return p;
         } catch (err) {
-          const configuredTarget = parseDatabaseUrl(process.env.DATABASE_URL);
+          const configuredTarget = parseDatabaseUrl(connectionString);
           if (err.code === '3D000' && !requiresPostgres() && configuredTarget?.database === 'reachpay' && !configuredTarget.isNeon) {
             try {
               await p.end().catch(() => {});
-              const devUrl = new URL(process.env.DATABASE_URL);
+              const devUrl = new URL(connectionString);
               devUrl.pathname = '/reachpay_dev';
               activeConnString = devUrl.toString();
               p = await createPool(activeConnString);
@@ -254,12 +257,14 @@ export function safeAuthErrorResponse(error, requestId) {
     name: error?.name,
     code: error?.code,
     location: extractTopFrame(error),
+    step: error?.authStep || 'auth.request',
   });
   return { status: 500, body: { error: 'The account service could not complete the request.', reasonCode: 'INTERNAL_AUTH_ERROR' }, ...(headers ? { headers } : {}) };
 }
 
 export function reportAuthFailure(error, requestId, context = 'request') {
-  logAuthFailure(requestId, error, context);
+  if (String(error?.authStep || '').startsWith('register.')) logRegisterFailure(error, error.authStep);
+  else logAuthFailure(requestId, error, context);
   return safeAuthErrorResponse(error, requestId);
 }
 
@@ -774,6 +779,7 @@ async function signup(req, body, requestId) {
         }
       }
     } catch (err) {
+      err.authStep ||= 'register.insert_user';
       if (requiresPostgres()) throw err;
       // Fall back to local store
       p = null;
@@ -805,7 +811,7 @@ async function signup(req, body, requestId) {
 
   const [email, mobile] = await Promise.allSettled([sendEmailCode(created.user), sendPhoneCode(created.user)]);
   for (const [channel, delivery] of [['email', email], ['mobile', mobile]]) {
-    if (delivery.status === 'rejected') logAuthFailure(requestId, delivery.reason, `${channel}_otp_delivery`);
+    if (delivery.status === 'rejected') logRegisterFailure(delivery.reason, channel === 'email' ? 'register.send_email' : 'register.send_mobile');
   }
 
   return {
@@ -822,6 +828,12 @@ async function signup(req, body, requestId) {
       message: isProduction() ? 'Account created. Verify both contact methods to open the dashboard.' : 'Account created. Verify both contact methods to open the dashboard (code 123456 in dev mode).',
     },
   };
+}
+
+function logRegisterFailure(error, step) {
+  const name = typeof error?.name === 'string' && /^[A-Za-z][A-Za-z0-9]{0,63}$/.test(error.name) ? error.name : 'Error';
+  const code = typeof error?.code === 'string' && /^[A-Za-z0-9_-]{1,32}$/.test(error.code) ? error.code : '';
+  console.error(JSON.stringify({ event: 'auth.register_failure', step, name, code }));
 }
 
 async function login(req, body, requestId) {
@@ -941,7 +953,7 @@ async function login(req, body, requestId) {
     }
   }
 
-  if (!user) {
+  if (!user && !requiresPostgres()) {
     user = await localAuthDb.findUserByEmailOrMobile(searchEmail, normalizedMobile, cleanDigits10);
     if (!user) {
       return { status: 401, body: { error: 'Incorrect email/mobile number or password. Please check your credentials.' } };
@@ -1217,6 +1229,8 @@ export async function handleAuth(req, action, body = {}) {
     result.headers = { 'X-Request-Id': requestId, ...(result.headers || {}) };
     return result;
   } catch (error) {
+    if (act === 'signup') error.authStep ||= 'register.request';
+    else error.authStep ||= `${act}.request`;
     return reportAuthFailure(error, requestId);
   }
 }

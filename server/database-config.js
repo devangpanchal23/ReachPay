@@ -1,5 +1,9 @@
 const ALLOWED_DATABASE_NAMES = new Set(['reachpay', 'reachpay_dev', 'reachpay_test']);
 
+export function databaseConnectionString(env = process.env) {
+  return env.DATABASE_URL?.trim() || env.POSTGRES_URL?.trim() || '';
+}
+
 export function parseDatabaseUrl(connectionString) {
   try {
     const url = new URL(connectionString);
@@ -46,7 +50,7 @@ export function authEnvironmentStatus(env = process.env) {
   const smtpReady = Boolean(env.SMTP_HOST && env.SMTP_PORT && env.SMTP_USER && env.SMTP_PASS && env.SMTP_FROM_EMAIL);
   const resendReady = Boolean(env.RESEND_API_KEY && env.CONTACT_FROM_EMAIL);
   return {
-    databaseConfigured: Boolean(env.DATABASE_URL?.trim()),
+    databaseConfigured: Boolean(databaseConnectionString(env)),
     ownerEmailConfigured: Boolean(env.OWNER_EMAIL?.trim()),
     otpSecretConfigured: Boolean(env.AUTH_OTP_SECRET && env.AUTH_OTP_SECRET.length >= 32),
     rateLimitSecretConfigured: Boolean(env.AUTH_RATE_LIMIT_SECRET && env.AUTH_RATE_LIMIT_SECRET.length >= 32),

@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import { mock } from 'node:test';
 import { hashOtp, hashPassword, normalizeEmail, normalizeMobile, parseCookies, safeEqualHex, sessionCookie, validateRegistration, verifyPassword } from '../server/auth-core.js';
 import { authRequestId, errorHasMigrationSignal, handleAuth, rateAllowed, reportAuthFailure, safeAuthErrorResponse, tryPromoteVerifiedOwner } from '../server/auth-controller.js';
+import { databaseConnectionString } from '../server/database-config.js';
 import { validateSmsConfiguration } from '../server/sms/twilio-verify.js';
 import unavailableFinancialApi from '../api/[...path].js';
 import { cleanNationalInput, emailError, maxNationalDigits, nameError, passwordError, PHONE_COUNTRIES, phoneError } from '../shared/phone-validation.js';
@@ -19,6 +20,12 @@ test('auth request ids are bounded and reject log injection', () => {
   assert.equal(authRequestId('vercel-trace-123'), 'vercel-trace-123');
   assert.match(authRequestId('bad-id\nreasonCode=FAKE'), /^[0-9a-f-]{36}$/);
   assert.match(authRequestId('x'.repeat(101)), /^[0-9a-f-]{36}$/);
+});
+
+test('auth accepts standard Neon connection variable names with DATABASE_URL precedence', () => {
+  assert.equal(databaseConnectionString({ DATABASE_URL: ' postgres://db/reachpay ', POSTGRES_URL: 'postgres://fallback/reachpay' }), 'postgres://db/reachpay');
+  assert.equal(databaseConnectionString({ POSTGRES_URL: ' postgres://neon/reachpay ' }), 'postgres://neon/reachpay');
+  assert.equal(databaseConnectionString({}), '');
 });
 
 test('normalizes email and phone inputs', () => {
@@ -94,26 +101,34 @@ test('auth mutations fail closed when PostgreSQL is explicitly required and not 
   }
 });
 
-test('production Vercel login and logout do not create or use the local auth filesystem store', async () => {
-  const keys = ['NODE_ENV', 'VERCEL', 'DATABASE_URL', 'AUTH_REQUIRE_POSTGRES', 'AUTH_RATE_LIMIT_SECRET'];
+test('production Vercel login, logout, and register do not touch the local auth filesystem store', async () => {
+  const keys = ['NODE_ENV', 'VERCEL', 'DATABASE_URL', 'POSTGRES_URL', 'AUTH_REQUIRE_POSTGRES', 'AUTH_RATE_LIMIT_SECRET', 'PUBLIC_SITE_URL'];
   const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
-  const mkdirSync = mock.method(fs, 'mkdirSync');
+  const fsMethods = ['existsSync', 'mkdirSync', 'readFileSync', 'writeFileSync', 'renameSync'];
+  const fsMocks = fsMethods.map((method) => mock.method(fs, method));
   process.env.NODE_ENV = 'production';
   process.env.VERCEL = '1';
   delete process.env.DATABASE_URL;
+  delete process.env.POSTGRES_URL;
   delete process.env.AUTH_REQUIRE_POSTGRES;
-  delete process.env.AUTH_RATE_LIMIT_SECRET;
+  process.env.AUTH_RATE_LIMIT_SECRET = 'test-rate-limit-secret-that-is-at-least-32-bytes';
+  process.env.PUBLIC_SITE_URL = 'https://example.test';
   try {
-    const headers = { origin: 'http://localhost:5173', host: 'localhost:5173' };
+    const headers = { origin: 'https://example.test', host: 'example.test' };
     const login = await handleAuth({ method: 'POST', headers }, 'login', { identifier: 'person@example.test', password: 'test-password' });
     assert.equal(login.status, 500);
-    assert.deepEqual(login.body, { error: 'The account service could not complete the request.', reasonCode: 'INTERNAL_AUTH_ERROR' });
+    assert.equal(login.body.reasonCode, 'INTERNAL_AUTH_ERROR');
     const logout = await handleAuth({ method: 'POST', headers: { ...headers, cookie: 'reachpay_session=fake-session-token' } }, 'logout', {});
     assert.equal(logout.status, 500);
     assert.deepEqual(logout.body, { error: 'The account service could not complete the request.', reasonCode: 'INTERNAL_AUTH_ERROR' });
-    assert.equal(mkdirSync.mock.callCount(), 0);
+    const register = await handleAuth({ method: 'POST', headers, socket: { remoteAddress: '127.0.0.1' } }, 'register', {
+      name: 'Example User', email: 'example@example.test', mobile: '9876543210', password: 'a-long-password-1', verificationConsent: true,
+    });
+    assert.equal(register.status, 503);
+    assert.equal(register.body.reasonCode, 'DATABASE_NOT_CONFIGURED');
+    for (const fsMock of fsMocks) assert.equal(fsMock.mock.callCount(), 0);
   } finally {
-    mkdirSync.mock.restore();
+    for (const fsMock of fsMocks) fsMock.mock.restore();
     for (const [key, value] of Object.entries(previous)) value === undefined ? delete process.env[key] : process.env[key] = value;
   }
 });
@@ -158,10 +173,11 @@ test('unexpected database failures return safe 500 and log the step and SQLSTATE
     assert.equal(authFailureFields.reasonCode, 'DATABASE_QUERY_FAILED');
     assert.equal(authFailureFields.context, 'login.session_insert');
     assert.equal(authFailureFields.sqlState, '23505');
-    assert.deepEqual(Object.keys(authInternal[1]).sort(), ['code', 'location', 'name']);
+    assert.deepEqual(Object.keys(authInternal[1]).sort(), ['code', 'location', 'name', 'step']);
     assert.equal(authInternal[1].name, 'Error');
     assert.equal(authInternal[1].code, '23505');
     assert.match(authInternal[1].location, /^at TestContext\./);
+    assert.equal(authInternal[1].step, 'login.session_insert');
     const loggedOutput = JSON.stringify(entries);
     assert.doesNotMatch(loggedOutput + JSON.stringify(result), /password|password hash|otp|token|cookie|session secret|DATABASE_URL|fake-session-token|654321|fake-cookie|private constraint data/i);
   } finally { console.error = oldError; }
