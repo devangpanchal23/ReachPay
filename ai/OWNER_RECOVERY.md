@@ -14,6 +14,8 @@ If the owner is missing but the configured account exists, make sure it is activ
 
 ## 3. If another or inconsistent owner exists
 
-Stop. Do not try to force a second owner or remove the current one. The unique owner index and database trigger protect the current owner from deletion, demotion, revocation, and locking. Resolve access to the existing owner identity, or arrange a reviewed recovery change that preserves the existing owner continuously and audits the change. Do not run ad hoc SQL against production.
+Stop. Do not try to force a second owner or remove the current one. There must be exactly one protected owner, and recovery must not lock out or replace that owner. The unique owner index and database trigger protect the current owner from deletion, demotion, revocation, and locking. Resolve access to the existing owner identity, or arrange a reviewed recovery change that preserves the existing owner continuously and audits the change. Do not run ad hoc SQL against production.
+
+If a login-time owner promotion fails, the account can still sign in under its normal verified or limited access rules. Use the schema check and repeat-safe auth migration to investigate an unassigned configured owner. Never create a second owner to work around the failure.
 
 After access is restored, verify the owner can sign in, complete both verification steps, and open owner-only tools. Confirm a non-owner still receives an access denial. Live financial operations must remain disabled.

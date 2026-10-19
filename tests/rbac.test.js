@@ -93,6 +93,14 @@ test('RBAC migration enforces a single protected owner and keeps the owner email
   assert.match(sql, /OWNER_EMAIL/);
 });
 
+test('auth schema checker validates the owner index from its PostgreSQL definition', async () => {
+  const checker = await readFile(new URL('../scripts/check-auth-schema.js', import.meta.url), 'utf8');
+  assert.match(checker, /pg_get_indexdef\(i\.indexrelid\)/);
+  assert.match(checker, /indisunique[\s\S]*indisvalid/);
+  assert.match(checker, /role\\s\*=/);
+  assert.match(checker, /'owner'/);
+});
+
 test('owner bootstrap migration is repeatable, verified-account-only, and never replaces a second owner', async () => {
   const sql = await readFile(new URL('../database/migrations/003_owner_bootstrap.sql', import.meta.url), 'utf8');
   assert.match(sql, /lower\(btrim\(email\)\) = lower\(btrim\(configured_owner_email\)\)/);

@@ -63,13 +63,6 @@ if (!process.env.DATABASE_URL) {
         WHERE x.relname = 'auth_rate_limits_window_idx' AND t.oid = to_regclass('public.auth_rate_limits')
           AND i.indisvalid AND i.indnkeyatts = 1 AND a.attname = 'window_started_at'
       ) AS present`],
-      ['customer_accounts_single_owner_idx', `SELECT EXISTS (
-        SELECT 1 FROM pg_index i JOIN pg_class x ON x.oid = i.indexrelid
-        JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
-        WHERE x.relname = 'customer_accounts_single_owner_idx' AND a.attname = 'role' AND i.indnkeyatts = 1
-          AND i.indrelid = to_regclass('public.customer_accounts') AND i.indisunique AND i.indisvalid
-          AND pg_get_expr(i.indpred, i.indrelid) ILIKE '%role%owner%'
-      ) AS present`],
       ['customer_accounts_owner_guard', `SELECT EXISTS (
         SELECT 1 FROM pg_trigger g WHERE g.tgrelid = to_regclass('public.customer_accounts')
           AND g.tgname = 'customer_accounts_owner_guard' AND NOT g.tgisinternal AND g.tgenabled IN ('O','A')
@@ -89,6 +82,17 @@ if (!process.env.DATABASE_URL) {
           AND pg_get_constraintdef(c.oid) ILIKE '%approved%pending%revoked%limited%'
       ) AS present`],
     ];
+    const ownerIndex = await pool.query(`SELECT i.indisunique, i.indisvalid,
+        pg_get_indexdef(i.indexrelid) AS definition
+      FROM pg_index i JOIN pg_class x ON x.oid = i.indexrelid
+      WHERE x.relname = 'customer_accounts_single_owner_idx'
+        AND i.indrelid = to_regclass('public.customer_accounts') LIMIT 1`);
+    const ownerIndexDef = String(ownerIndex.rows[0]?.definition || '').toLowerCase().replaceAll('"', '');
+    const ownerIndexPresent = Boolean(ownerIndex.rows[0]?.indisunique && ownerIndex.rows[0]?.indisvalid
+      && /\(\s*role\s*\)/.test(ownerIndexDef)
+      && /where\s*\(?\s*role\s*=\s*'owner'(?:\s*::\s*text)?\s*\)?\s*$/.test(ownerIndexDef));
+    if (!ownerIndexPresent) missingCount += 1;
+    process.stdout.write(`customer_accounts_single_owner_idx: ${ownerIndexPresent ? 'OK' : 'MISSING'}\n`);
     for (const [name, sql] of checks) {
       const { rows: checkRows } = await pool.query(sql);
       const presentItem = Boolean(checkRows[0]?.present);
