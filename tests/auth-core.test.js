@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { hashOtp, hashPassword, normalizeEmail, normalizeMobile, parseCookies, safeEqualHex, sessionCookie, validateRegistration, verifyPassword } from '../server/auth-core.js';
-import { authRequestId, errorHasMigrationSignal, handleAuth, rateAllowed, reportAuthFailure, safeAuthErrorResponse } from '../server/auth-controller.js';
+import { authRequestId, errorHasMigrationSignal, handleAuth, rateAllowed, reportAuthFailure, safeAuthErrorResponse, tryPromoteVerifiedOwner } from '../server/auth-controller.js';
 import { validateSmsConfiguration } from '../server/sms/twilio-verify.js';
 import unavailableFinancialApi from '../api/[...path].js';
 import { cleanNationalInput, emailError, maxNationalDigits, nameError, passwordError, PHONE_COUNTRIES, phoneError } from '../shared/phone-validation.js';
@@ -104,22 +104,63 @@ test('wrapped PostgreSQL missing table and column failures are identified as mig
   const conflictTarget = safeAuthErrorResponse(Object.assign(new Error('no unique or exclusion constraint matching the ON CONFLICT specification'), { code: '42P10' }), 'constraint-test');
   assert.equal(conflictTarget.status, 503);
   assert.equal(conflictTarget.body.reasonCode, 'DATABASE_MIGRATION_REQUIRED');
+  for (const code of ['42501', '40001', '40P01']) {
+    const unavailable = safeAuthErrorResponse(Object.assign(new Error('private database detail'), { code }), 'sqlstate-test');
+    assert.equal(unavailable.status, 503);
+    assert.equal(unavailable.body.reasonCode, 'DATABASE_UNAVAILABLE');
+  }
 });
 
-test('unexpected database failures return safe 500 and log only a reason code and request id', () => {
+test('unexpected database failures return safe 500 and log the step and SQLSTATE without secrets', () => {
+  const oldError = console.error;
+  const entries = [];
+  console.error = (...args) => entries.push(args);
+  try {
+    const raw = Object.assign(new Error('private database detail token=fake-session-token otp=654321 cookie=fake-cookie'), { code: '23505', detail: 'private constraint data' });
+    raw.authStep = 'login.session_insert';
+    const result = reportAuthFailure(raw, 'unexpected-db-test', 'test_auth_route');
+    assert.equal(result.status, 500);
+    assert.deepEqual(result.body, { error: 'The account service could not complete the request.', reasonCode: 'INTERNAL_AUTH_ERROR' });
+    assert.equal(entries.length, 2);
+    const authFailure = entries.find(([event]) => typeof event === 'string' && event.startsWith('{'));
+    const authInternal = entries.find(([event]) => event === 'auth.internal');
+    assert.ok(authFailure);
+    assert.ok(authInternal);
+    const authFailureFields = JSON.parse(authFailure[0]);
+    assert.equal(authFailureFields.event, 'auth.failure');
+    assert.equal(authFailureFields.requestId, 'unexpected-db-test');
+    assert.equal(authFailureFields.reasonCode, 'DATABASE_QUERY_FAILED');
+    assert.equal(authFailureFields.context, 'login.session_insert');
+    assert.equal(authFailureFields.sqlState, '23505');
+    assert.deepEqual(Object.keys(authInternal[1]).sort(), ['code', 'location', 'name']);
+    assert.equal(authInternal[1].name, 'Error');
+    assert.equal(authInternal[1].code, '23505');
+    assert.match(authInternal[1].location, /^at TestContext\./);
+    const loggedOutput = JSON.stringify(entries);
+    assert.doesNotMatch(loggedOutput + JSON.stringify(result), /password|password hash|otp|token|cookie|session secret|DATABASE_URL|fake-session-token|654321|fake-cookie|private constraint data/i);
+  } finally { console.error = oldError; }
+});
+
+test('owner promotion failure is logged safely and does not fail login flow', async () => {
+  const previous = process.env.OWNER_EMAIL;
+  process.env.OWNER_EMAIL = 'owner@example.test';
   const oldError = console.error;
   const entries = [];
   console.error = (...args) => entries.push(args.join(' '));
   try {
-    const raw = Object.assign(new Error('private database detail token=fake-session-token otp=654321 cookie=fake-cookie'), { code: '23505', detail: 'private constraint data' });
-    const result = reportAuthFailure(raw, 'unexpected-db-test', 'test_auth_route');
-    assert.equal(result.status, 500);
-    assert.deepEqual(result.body, { error: 'The account service could not complete the request.', reasonCode: 'INTERNAL_AUTH_ERROR' });
-    assert.equal(entries.length, 1);
-    assert.match(entries[0], /"requestId":"unexpected-db-test"/);
-    assert.match(entries[0], /"reasonCode":"DATABASE_QUERY_FAILED"/);
-    assert.doesNotMatch(entries[0] + JSON.stringify(result), /private database detail|private constraint data|23505|fake-session-token|654321|fake-cookie/);
-  } finally { console.error = oldError; }
+    const db = { async query(sql) {
+      if (sql.includes('UPDATE customer_accounts')) throw Object.assign(new Error('private owner row detail'), { code: 'P0001', table: 'customer_accounts' });
+      return { rows: [] };
+    } };
+    assert.equal(await tryPromoteVerifiedOwner(db, 'user-id', 'owner-promotion-test'), false);
+    assert.match(entries[0], /"context":"login.owner_promote"/);
+    assert.match(entries[0], /"reasonCode":"OWNER_PROMOTION_FAILED"/);
+    assert.match(entries[0], /"sqlState":"P0001"/);
+    assert.doesNotMatch(entries.join(' '), /private owner row detail|owner@example\.test|user-id/);
+  } finally {
+    console.error = oldError;
+    if (previous === undefined) delete process.env.OWNER_EMAIL; else process.env.OWNER_EMAIL = previous;
+  }
 });
 
 test('email-verified mobile-pending login succeeds without valid SMS configuration and stays limited', async () => {
@@ -144,6 +185,9 @@ test('email-verified mobile-pending login succeeds without valid SMS configurati
     const cookie = created.headers['Set-Cookie'].split(';')[0];
     const verifiedEmail = await handleAuth({ method: 'POST', headers: { ...headers, cookie }, socket: { remoteAddress: '198.51.100.12' } }, 'verify-email', { code: '123456' });
     assert.equal(verifiedEmail.status, 200);
+    const wrongPassword = await handleAuth({ method: 'POST', headers, socket: { remoteAddress: '198.51.100.15' } }, 'login', { identifier: email, password: 'not-the-password' });
+    assert.equal(wrongPassword.status, 401);
+    assert.equal(wrongPassword.body.reasonCode, 'INVALID_CREDENTIALS');
     const login = await handleAuth({ method: 'POST', headers, socket: { remoteAddress: '198.51.100.13' } }, 'login', { identifier: email, password });
     assert.equal(login.status, 200);
     assert.equal(login.body.next, '/auth/verify');
@@ -183,6 +227,7 @@ test('login returns 429 when its shared IP limit is exhausted', async () => {
     for (let attempt = 0; attempt < 500; attempt += 1) assert.equal(await rateAllowed(`login:ip:${ip}`, 500, 15), true);
     const result = await handleAuth({ method: 'POST', headers: { origin: 'http://localhost:5173', host: 'localhost:5173' }, socket: { remoteAddress: ip } }, 'login', { identifier: 'rate-limit@example.test', password: 'test-password' });
     assert.equal(result.status, 429);
+    assert.equal(result.body.reasonCode, 'RATE_LIMITED');
   } finally {
     for (const [key, value] of Object.entries(previous)) value === undefined ? delete process.env[key] : process.env[key] = value;
   }

@@ -173,7 +173,8 @@ function genericError(status = 503) {
       : status === 403
         ? 'Access forbidden.'
         : 'We could not complete that request. Check your details or try again later.';
-  return { status, body: { error } };
+  const reasonCode = status === 429 ? 'RATE_LIMITED' : status === 401 ? 'AUTHENTICATION_REQUIRED' : status === 403 ? 'ACCESS_FORBIDDEN' : 'AUTH_SERVICE_UNAVAILABLE';
+  return { status, body: { error, reasonCode } };
 }
 
 function authFailureCategory(error) {
@@ -182,6 +183,7 @@ function authFailureCategory(error) {
   for (let current = error; current && errors.length < 4; current = current.cause) errors.push(current);
   const messages = errors.map((entry) => String(entry?.message || ''));
   const codes = errors.map((entry) => String(entry?.code || ''));
+  if (codes.some((code) => ['42501', '40001', '40P01', '55P03', '57014'].includes(code) || code.startsWith('08') || code.startsWith('53') || code.startsWith('58'))) return 'DATABASE_UNAVAILABLE';
   if (messages.includes('DATABASE_NOT_CONFIGURED')) return 'DATABASE_NOT_CONFIGURED';
   if (messages.includes('DATABASE_URL_INVALID')) return 'DATABASE_URL_INVALID';
   if (messages.includes('DATABASE_NOT_ALLOWED')) return 'DATABASE_NOT_ALLOWED';
@@ -218,9 +220,15 @@ export function errorHasMigrationSignal(error) {
 
 function errorHasDatabaseAvailabilitySignal(error) {
   for (let current = error, depth = 0; current && depth < 5; current = current.cause, depth += 1) {
-    if (current.message === 'DATABASE_UNAVAILABLE' || String(current.code || '').startsWith('08') || ['28P01', '28000', '3D000', '53300', '53400', '57P01', '57P02', '57P03', 'ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'ETIMEDOUT', 'ECONNRESET', 'EPIPE', 'ENETUNREACH', 'ERR_TLS_CERT_ALTNAME_INVALID', 'CERT_HAS_EXPIRED', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE'].includes(String(current.code || ''))) return true;
+    if (current.message === 'DATABASE_UNAVAILABLE' || String(current.code || '').startsWith('08') || ['42501', '40001', '40P01', '55P03', '57014', '28P01', '28000', '3D000', '53300', '53400', '57P01', '57P02', '57P03', 'ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'ETIMEDOUT', 'ECONNRESET', 'EPIPE', 'ENETUNREACH', 'ERR_TLS_CERT_ALTNAME_INVALID', 'CERT_HAS_EXPIRED', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE'].includes(String(current.code || ''))) return true;
   }
   return false;
+}
+
+function extractTopFrame(error) {
+  const stack = typeof error?.stack === 'string' ? error.stack : '';
+  const frame = stack.split('\n').find((line) => /^\s+at\s/.test(line));
+  return frame ? frame.trim().slice(0, 200) : undefined;
 }
 
 export function safeAuthErrorResponse(error, requestId) {
@@ -236,6 +244,11 @@ export function safeAuthErrorResponse(error, requestId) {
   if (errorHasDatabaseAvailabilitySignal(error)) {
     return { status: 503, body: { error: 'Account service is temporarily unavailable.', reasonCode: authFailureCategory(error) }, ...(headers ? { headers } : {}) };
   }
+  console.error('auth.internal', {
+    name: error?.name,
+    code: error?.code,
+    location: extractTopFrame(error),
+  });
   return { status: 500, body: { error: 'The account service could not complete the request.', reasonCode: 'INTERNAL_AUTH_ERROR' }, ...(headers ? { headers } : {}) };
 }
 
@@ -245,7 +258,21 @@ export function reportAuthFailure(error, requestId, context = 'request') {
 }
 
 function logAuthFailure(requestId, error, context = 'request') {
-  console.error(JSON.stringify({ level: 'error', event: 'auth.failure', requestId, context, reasonCode: authFailureCategory(error) }));
+  const errors = [];
+  for (let current = error; current && errors.length < 5; current = current.cause) errors.push(current);
+  const sqlState = errors.map((entry) => String(entry?.code || '')).find((code) => /^[0-9A-Z]{5}$/.test(code));
+  const constraint = errors.map((entry) => entry?.constraint).find((value) => typeof value === 'string' && /^[A-Za-z0-9_.-]{1,128}$/.test(value));
+  const table = errors.map((entry) => entry?.table).find((value) => typeof value === 'string' && /^[A-Za-z0-9_.-]{1,128}$/.test(value));
+  console.error(JSON.stringify({ level: 'error', event: 'auth.failure', requestId, context: error?.authStep || context, reasonCode: error?.authReasonCode || authFailureCategory(error), ...(sqlState ? { sqlState } : {}), ...(constraint ? { constraint } : {}), ...(table ? { table } : {}) }));
+}
+
+async function loginStep(step, operation) {
+  try { return await operation(); }
+  catch (error) {
+    const wrapped = new Error('LOGIN_STEP_FAILED', { cause: error });
+    wrapped.authStep = step;
+    throw wrapped;
+  }
 }
 
 export async function authHealthStatus() {
@@ -440,6 +467,19 @@ async function promoteVerifiedOwner(db, userId) {
   await db.query(`UPDATE customer_accounts SET role='owner',access_status='approved',updated_at=now()
     WHERE id=$1 AND lower(btrim(email))=lower(btrim($2)) AND email_verified_at IS NOT NULL AND status='ACTIVE'
     AND (role='owner' OR NOT EXISTS (SELECT 1 FROM customer_accounts WHERE role='owner'))`, [userId, ownerEmail]);
+}
+
+export async function tryPromoteVerifiedOwner(db, userId, requestId = randomUUID()) {
+  try {
+    await promoteVerifiedOwner(db, userId);
+    return true;
+  } catch (error) {
+    const wrapped = new Error('OWNER_PROMOTION_FAILED', { cause: error });
+    wrapped.authStep = 'login.owner_promote';
+    wrapped.authReasonCode = 'OWNER_PROMOTION_FAILED';
+    logAuthFailure(requestId, wrapped, 'login.owner_promote');
+    return false;
+  }
 }
 
 async function ownerRequest(req) {
@@ -782,13 +822,15 @@ async function login(req, body, requestId) {
   const identifier = typeof body?.identifier === 'string' ? body.identifier.trim() : '';
   const password = typeof body?.password === 'string' ? body.password : '';
   if (!identifier || !password || password.length > 128) {
-    return { status: 401, body: { error: 'Please enter both your email or mobile number and password.' } };
+    return { status: 401, body: { error: 'Please enter both your email or mobile number and password.', reasonCode: 'INVALID_CREDENTIALS' } };
   }
 
   // Rate limiting: relaxed in development to prevent lockouts during testing
   const ipMax = isProduction() ? 10 : 500;
   const idMax = isProduction() ? 8 : 500;
-  if (!await rateAllowed(`login:ip:${clientIp(req)}`, ipMax, 15) || !await rateAllowed(`login:id:${identifier.toLowerCase()}`, idMax, 15)) {
+  const ipAllowed = await loginStep('login.rate_limit', () => rateAllowed(`login:ip:${clientIp(req)}`, ipMax, 15));
+  const idAllowed = ipAllowed && await loginStep('login.rate_limit', () => rateAllowed(`login:id:${identifier.toLowerCase()}`, idMax, 15));
+  if (!ipAllowed || !idAllowed) {
     return genericError(429);
   }
 
@@ -827,12 +869,13 @@ async function login(req, body, requestId) {
 
   let user = null;
   let token = null;
+  let ownerPromotionSucceeded = true;
 
   const p = await pool();
   if (p) {
     try {
       // Resilient SQL query supporting email OR mobile (E.164, 10 digits, +91 prefix)
-      const { rows } = await p.query(
+      const { rows } = await loginStep('login.account_lookup', () => p.query(
         `SELECT id, name, email, mobile_e164, password_hash, password_salt, email_verified_at, mobile_verified_at, status, role, access_status,
                 EXISTS (SELECT 1 FROM customer_accounts other WHERE other.role='owner' AND other.id<>customer_accounts.id) AS has_conflicting_owner
          FROM customer_accounts
@@ -856,22 +899,33 @@ async function login(req, body, requestId) {
          )
          LIMIT 1`,
         [searchEmail, normalizedMobile, cleanDigits10 || null]
-      );
+      ));
 
       user = rows[0];
       if (user) {
         if (user.status === 'LOCKED' || user.status === 'DISABLED') {
-          return { status: 403, body: { error: 'This account has been locked or disabled. Please contact support.' } };
+          return { status: 403, body: { error: 'This account has been locked or disabled. Please contact support.', reasonCode: 'ACCOUNT_RESTRICTED' } };
         }
-        const passwordMatches = await verifyPassword(password, user.password_salt, user.password_hash);
+        const passwordMatches = await loginStep('login.password_verify', () => verifyPassword(password, user.password_salt, user.password_hash));
         if (!passwordMatches) {
-          return { status: 401, body: { error: 'Incorrect email/mobile number or password. Please check your credentials.' } };
+          return { status: 401, body: { error: 'Incorrect email/mobile number or password. Please check your credentials.', reasonCode: 'INVALID_CREDENTIALS' } };
         }
-        if (user.email_verified_at && user.mobile_verified_at) await withDb(async (db) => promoteVerifiedOwner(db, user.id));
+        if (user.email_verified_at && user.mobile_verified_at) {
+          try {
+            ownerPromotionSucceeded = await loginStep('login.owner_promote', () => withDb(async (db) => tryPromoteVerifiedOwner(db, user.id, requestId)));
+          } catch (error) {
+            const failure = new Error('OWNER_PROMOTION_FAILED', { cause: error });
+            failure.authReasonCode = 'OWNER_PROMOTION_FAILED';
+            failure.authStep = 'login.owner_promote';
+            logAuthFailure(requestId, failure, 'login.owner_promote');
+            ownerPromotionSucceeded = false;
+          }
+        }
         user = resolveEffectiveRole(user, process.env.OWNER_EMAIL, user.has_conflicting_owner);
+        if (!ownerPromotionSucceeded && user.role === 'owner') user = { ...user, role: 'limited', access_status: 'limited' };
         token = await withDb(async (db) => {
-          const session = await issueSession(db, user.id);
-          await audit(db, user.id, 'LOGIN_SUCCEEDED', requestId);
+          const session = await loginStep('login.session_insert', () => issueSession(db, user.id));
+          await loginStep('login.audit_insert', () => audit(db, user.id, 'LOGIN_SUCCEEDED', requestId));
           return session;
         });
       }
@@ -887,11 +941,11 @@ async function login(req, body, requestId) {
       return { status: 401, body: { error: 'Incorrect email/mobile number or password. Please check your credentials.' } };
     }
     if (user.status === 'LOCKED' || user.status === 'DISABLED') {
-      return { status: 403, body: { error: 'This account has been locked or disabled. Please contact support.' } };
+      return { status: 403, body: { error: 'This account has been locked or disabled. Please contact support.', reasonCode: 'ACCOUNT_RESTRICTED' } };
     }
-    const passwordMatches = await verifyPassword(password, user.password_salt, user.password_hash);
+    const passwordMatches = await loginStep('login.password_verify', () => verifyPassword(password, user.password_salt, user.password_hash));
     if (!passwordMatches) {
-      return { status: 401, body: { error: 'Incorrect email/mobile number or password. Please check your credentials.' } };
+      return { status: 401, body: { error: 'Incorrect email/mobile number or password. Please check your credentials.', reasonCode: 'INVALID_CREDENTIALS' } };
     }
     if (user.email_verified_at && user.mobile_verified_at) await localAuthDb.promoteConfiguredOwner(user.id);
     const store = localAuthDb.getStore();
@@ -902,9 +956,10 @@ async function login(req, body, requestId) {
   }
 
   const complete = hasCompletedLoginVerification(user);
+  const cookie = await loginStep('login.cookie', async () => sessionCookie(token));
   return {
     status: 200,
-    headers: { 'Set-Cookie': sessionCookie(token) },
+    headers: { 'Set-Cookie': cookie },
     body: {
       ok: true,
       next: complete ? '/dashboard' : '/auth/verify',
