@@ -247,6 +247,30 @@ export const localAuthDb = {
     return current.attempts <= maximum;
   },
 
+  async rateLimitAllowed(keyHash, maximum = 6, minutes = 15) {
+    return (await this.rateLimitStatus(keyHash, maximum, minutes)).allowed;
+  },
+
+  async rateLimitStatus(keyHash, maximum = 6, minutes = 15) {
+    const store = loadStore();
+    const current = store.rateLimits[keyHash];
+    if (!current || Date.now() - current.windowStartedAt >= minutes * 60 * 1000 || current.attempts < maximum) return { allowed: true, retryAfterSeconds: 0 };
+    return { allowed: false, retryAfterSeconds: Math.max(1, Math.ceil((current.windowStartedAt + minutes * 60 * 1000 - Date.now()) / 1000)) };
+  },
+
+  async recordRateLimits(entries) {
+    const store = loadStore();
+    const now = Date.now();
+    const nextLimits = { ...store.rateLimits };
+    for (const { keyHash, minutes } of entries) {
+      const current = nextLimits[keyHash];
+      if (!current || now - current.windowStartedAt > minutes * 60 * 1000) nextLimits[keyHash] = { windowStartedAt: now, attempts: 1 };
+      else nextLimits[keyHash] = { ...current, attempts: current.attempts + 1 };
+    }
+    store.rateLimits = nextLimits;
+    saveStore();
+  },
+
   async recordAuditEvent(userId, eventType, requestId) {
     const store = loadStore();
     store.auditEvents.push({

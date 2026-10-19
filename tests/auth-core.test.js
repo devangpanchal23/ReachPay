@@ -6,8 +6,10 @@ import { clearSessionCookie, hashOtp, hashPassword, normalizeEmail, normalizeMob
 import { authRequestId, errorHasMigrationSignal, handleAuth, rateAllowed, reportAuthFailure, safeAuthErrorResponse, tryPromoteVerifiedOwner } from '../server/auth-controller.js';
 import { databaseConnectionString } from '../server/database-config.js';
 import { validateSmsConfiguration } from '../server/sms/twilio-verify.js';
+import { localAuthDb } from '../server/auth-storage.js';
 import unavailableFinancialApi from '../api/[...path].js';
 import { cleanNationalInput, emailError, maxNationalDigits, nameError, passwordError, PHONE_COUNTRIES, phoneError } from '../shared/phone-validation.js';
+import { loginFailurePresentation } from '../src/auth-login-errors.js';
 
 test('Twilio Verify credentials require an AC account SID and reject API key SIDs', () => {
   const valid = { SMS_PROVIDER: 'twilio-verify', TWILIO_ACCOUNT_SID: `AC${'a'.repeat(32)}`, TWILIO_AUTH_TOKEN: 'private-value', TWILIO_VERIFY_SERVICE_SID: `VA${'b'.repeat(32)}` };
@@ -20,6 +22,108 @@ test('auth request ids are bounded and reject log injection', () => {
   assert.equal(authRequestId('vercel-trace-123'), 'vercel-trace-123');
   assert.match(authRequestId('bad-id\nreasonCode=FAKE'), /^[0-9a-f-]{36}$/);
   assert.match(authRequestId('x'.repeat(101)), /^[0-9a-f-]{36}$/);
+});
+
+test('login failure presentation gives safe messages for every HTTP status', () => {
+  assert.equal(loginFailurePresentation(401, 'INVALID_CREDENTIALS').message, 'Email ya password galat hai.');
+  assert.match(loginFailurePresentation(429, 'RATE_LIMITED').message, /15 minute/);
+  assert.match(loginFailurePresentation(429, 'RATE_LIMITED', 121).message, /3 minute/);
+  assert.equal(loginFailurePresentation(403, 'VERIFICATION_REQUIRED').redirect, '/auth/verify');
+  assert.match(loginFailurePresentation(403, 'ACCESS_PENDING').message, /pending/);
+  assert.match(loginFailurePresentation(403, 'ACCOUNT_RESTRICTED').message, /Support/);
+  assert.match(loginFailurePresentation(503, 'DATABASE_UNAVAILABLE').message, /Service abhi uplabdh nahi/);
+  assert.match(loginFailurePresentation(undefined, undefined).message, /Service abhi uplabdh nahi/);
+  const source = fs.readFileSync(new URL('../src/site.jsx', import.meta.url), 'utf8');
+  assert.match(source, /setLogin\(\(current\) => \(\{ \.\.\.current, password: '' \}\)\)/);
+  assert.match(source, /role="alert">\{error\}/);
+});
+
+test('login rejections use safe labels for unknown, incorrect-password, inactive, and limited accounts', async () => {
+  const previous = Object.fromEntries(['DATABASE_URL', 'AUTH_REQUIRE_POSTGRES', 'PUBLIC_SITE_URL', 'OWNER_EMAIL'].map((key) => [key, process.env[key]]));
+  delete process.env.DATABASE_URL;
+  delete process.env.AUTH_REQUIRE_POSTGRES;
+  process.env.PUBLIC_SITE_URL = 'http://localhost:5173';
+  delete process.env.OWNER_EMAIL;
+  const email = `reject_${Date.now()}@example.test`;
+  const headers = { origin: 'http://localhost:5173', host: 'localhost:5173' };
+  const originalConsoleError = console.error;
+  try {
+    const signup = await handleAuth({ method: 'POST', headers, socket: { remoteAddress: '198.51.100.81' } }, 'signup', {
+      name: 'Rejected Login', email, mobile: `9${String(Date.now()).slice(-9)}`, password: 'safe-reject-password-123', verificationConsent: true,
+    });
+    assert.equal(signup.status, 201);
+    const account = localAuthDb.getStore().accounts.find((item) => item.email === email);
+    assert.ok(account);
+    const recorded = [];
+    console.error = (line) => recorded.push(JSON.parse(line));
+    const unknown = await handleAuth({ method: 'POST', headers, socket: { remoteAddress: '198.51.100.82' } }, 'login', { identifier: 'missing@example.test', password: 'never-log-this-password' });
+    const incorrect = await handleAuth({ method: 'POST', headers, socket: { remoteAddress: '198.51.100.83' } }, 'login', { identifier: email, password: 'also-never-log-this' });
+    account.status = 'DISABLED';
+    const inactive = await handleAuth({ method: 'POST', headers, socket: { remoteAddress: '198.51.100.84' } }, 'login', { identifier: email, password: 'safe-reject-password-123' });
+    assert.equal(unknown.status, 401);
+    assert.equal(incorrect.status, 401);
+    assert.equal(unknown.body.error, incorrect.body.error);
+    assert.equal(inactive.status, 403);
+    assert.equal(inactive.body.reasonCode, 'ACCOUNT_RESTRICTED');
+    assert.deepEqual(recorded.map(({ event, step, reasonCode, status }) => ({ event, step, reasonCode, status })), [
+      { event: 'auth.login_rejected', step: 'login.account_lookup', reasonCode: 'INVALID_CREDENTIALS', status: 401 },
+      { event: 'auth.login_rejected', step: 'login.password_verify', reasonCode: 'INVALID_CREDENTIALS', status: 401 },
+      { event: 'auth.login_rejected', step: 'login.account_status', reasonCode: 'ACCOUNT_RESTRICTED', status: 403 },
+    ]);
+    assert.deepEqual(Object.keys(recorded[0]).sort(), ['event', 'reasonCode', 'status', 'step']);
+    assert.doesNotMatch(JSON.stringify(recorded), /missing@example|never-log-this|also-never-log-this|safe-reject-password|198\.51\.100/);
+  } finally {
+    console.error = originalConsoleError;
+    for (const [key, value] of Object.entries(previous)) value === undefined ? delete process.env[key] : process.env[key] = value;
+  }
+});
+
+test('login session or audit persistence failure returns 500 and never reports success', async () => {
+  const previous = Object.fromEntries(['DATABASE_URL', 'AUTH_REQUIRE_POSTGRES', 'PUBLIC_SITE_URL', 'OWNER_EMAIL'].map((key) => [key, process.env[key]]));
+  delete process.env.DATABASE_URL;
+  delete process.env.AUTH_REQUIRE_POSTGRES;
+  process.env.PUBLIC_SITE_URL = 'http://localhost:5173';
+  const email = `persist_${Date.now()}@example.test`;
+  process.env.OWNER_EMAIL = email;
+  const password = 'persist-failure-password-123';
+  const headers = { origin: 'http://localhost:5173', host: 'localhost:5173' };
+  const originalConsoleError = console.error;
+  const originalCreateSession = localAuthDb.createSession;
+  const originalRecordAudit = localAuthDb.recordAuditEvent;
+  try {
+    const signup = await handleAuth({ method: 'POST', headers, socket: { remoteAddress: '198.51.100.91' } }, 'signup', {
+      name: 'Persistence Test', email, mobile: `9${String(Date.now()).slice(-9)}`, password, verificationConsent: true,
+    });
+    const cookie = signup.headers['Set-Cookie'].split(';')[0];
+    await handleAuth({ method: 'POST', headers: { ...headers, cookie }, socket: { remoteAddress: '198.51.100.91' } }, 'verify-email', { code: '123456' });
+    await handleAuth({ method: 'POST', headers: { ...headers, cookie }, socket: { remoteAddress: '198.51.100.91' } }, 'verify-mobile', { code: '123456' });
+    const ownerLogin = await handleAuth({ method: 'POST', headers, socket: { remoteAddress: '198.51.100.94' } }, 'login', { identifier: email, password });
+    assert.equal(ownerLogin.status, 200);
+    assert.equal(ownerLogin.body.user.status, 'ACTIVE');
+    assert.equal(ownerLogin.body.user.role, 'owner');
+    await handleAuth({ method: 'POST', headers: { ...headers, cookie: ownerLogin.headers['Set-Cookie'].split(';')[0] } }, 'logout');
+
+    for (const [method, expectedStep] of [['createSession', 'login.session_insert'], ['recordAuditEvent', 'login.audit_insert']]) {
+      const logs = [];
+      console.error = (line) => logs.push(line);
+      localAuthDb[method] = async () => { throw new Error('private persistence failure'); };
+      const result = await handleAuth({ method: 'POST', headers, socket: { remoteAddress: `198.51.100.${method === 'createSession' ? 92 : 93}` } }, 'login', { identifier: email, password });
+      assert.equal(result.status, 500);
+      assert.equal(result.body.reasonCode, 'INTERNAL_AUTH_ERROR');
+      const rejection = logs.map((line) => line.match(/\{"event":"auth\.login_rejected"[^\n]*/)?.[0]).filter(Boolean).map((line) => JSON.parse(line));
+      assert.equal(rejection.length, 1);
+      assert.equal(rejection[0].step, expectedStep);
+      assert.equal(rejection[0].status, 500);
+      assert.equal(rejection[0].event, 'auth.login_rejected');
+      assert.doesNotMatch(logs.join(' '), /private persistence failure|persist-failure-password|persist_/);
+      localAuthDb[method] = method === 'createSession' ? originalCreateSession : originalRecordAudit;
+    }
+  } finally {
+    localAuthDb.createSession = originalCreateSession;
+    localAuthDb.recordAuditEvent = originalRecordAudit;
+    console.error = originalConsoleError;
+    for (const [key, value] of Object.entries(previous)) value === undefined ? delete process.env[key] : process.env[key] = value;
+  }
 });
 
 test('auth accepts standard Neon connection variable names with DATABASE_URL precedence', () => {
@@ -178,11 +282,16 @@ test('production Vercel login, logout, and register do not touch the local auth 
   delete process.env.AUTH_REQUIRE_POSTGRES;
   process.env.AUTH_RATE_LIMIT_SECRET = 'test-rate-limit-secret-that-is-at-least-32-bytes';
   process.env.PUBLIC_SITE_URL = 'https://example.test';
+  const originalConsoleError = console.error;
+  const logs = [];
+  console.error = (...args) => logs.push(args.join(' '));
   try {
     const headers = { origin: 'https://example.test', host: 'example.test' };
     const login = await handleAuth({ method: 'POST', headers }, 'login', { identifier: 'person@example.test', password: 'test-password' });
     assert.equal(login.status, 500);
     assert.equal(login.body.reasonCode, 'INTERNAL_AUTH_ERROR');
+    const rejection = logs.map((line) => line.match(/\{"event":"auth\.login_rejected"[^\n]*/)?.[0]).filter(Boolean).map((line) => JSON.parse(line));
+    assert.deepEqual(rejection, [{ event: 'auth.login_rejected', step: 'login.rate_limit', reasonCode: 'DATABASE_NOT_CONFIGURED', status: 500 }]);
     const logout = await handleAuth({ method: 'POST', headers: { ...headers, cookie: 'reachpay_session=fake-session-token' } }, 'logout', {});
     assert.equal(logout.status, 500);
     assert.deepEqual(logout.body, { error: 'The account service could not complete the request.', reasonCode: 'INTERNAL_AUTH_ERROR' });
@@ -193,6 +302,7 @@ test('production Vercel login, logout, and register do not touch the local auth 
     assert.equal(register.body.reasonCode, 'DATABASE_NOT_CONFIGURED');
     for (const fsMock of fsMocks) assert.equal(fsMock.mock.callCount(), 0);
   } finally {
+    console.error = originalConsoleError;
     for (const fsMock of fsMocks) fsMock.mock.restore();
     for (const [key, value] of Object.entries(previous)) value === undefined ? delete process.env[key] : process.env[key] = value;
   }
@@ -330,14 +440,28 @@ test('login returns 429 when its shared IP limit is exhausted', async () => {
   delete process.env.AUTH_REQUIRE_POSTGRES;
   process.env.PUBLIC_SITE_URL = 'http://localhost:5173';
   const ip = `198.51.100.${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const originalConsoleError = console.error;
+  const logs = [];
   try {
+    console.error = (line) => logs.push(JSON.parse(line));
     for (let attempt = 0; attempt < 500; attempt += 1) assert.equal(await rateAllowed(`login:ip:${ip}`, 500, 15), true);
     const result = await handleAuth({ method: 'POST', headers: { origin: 'http://localhost:5173', host: 'localhost:5173' }, socket: { remoteAddress: ip } }, 'login', { identifier: 'rate-limit@example.test', password: 'test-password' });
     assert.equal(result.status, 429);
     assert.equal(result.body.reasonCode, 'RATE_LIMITED');
+    assert.ok(Number(result.headers['Retry-After']) > 0 && Number(result.headers['Retry-After']) <= 900);
+    assert.deepEqual(logs.at(-1), { event: 'auth.login_rejected', step: 'login.rate_limit', reasonCode: 'RATE_LIMITED', status: 429 });
   } finally {
+    console.error = originalConsoleError;
     for (const [key, value] of Object.entries(previous)) value === undefined ? delete process.env[key] : process.env[key] = value;
   }
+});
+
+test('read-only login rate-limit preflight does not increase failure attempts', async () => {
+  const keyHash = `rate-limit-preflight-${Date.now()}`;
+  await localAuthDb.checkRateLimit(keyHash, 10, 15);
+  const before = localAuthDb.getStore().rateLimits[keyHash].attempts;
+  assert.equal(await localAuthDb.rateLimitAllowed(keyHash, 10, 15), true);
+  assert.equal(localAuthDb.getStore().rateLimits[keyHash].attempts, before);
 });
 
 test('signup, login, and verification succeed in local development mode without external database', async () => {

@@ -381,6 +381,56 @@ export async function rateAllowed(key, maximum = 6, minutes = 15) {
   return localAuthDb.checkRateLimit(rateHash(key), maximum, minutes);
 }
 
+async function loginRateStatus(key, maximum, minutes) {
+  if (requiresPostgres() && !isPostgresConfigured()) throw new Error('DATABASE_NOT_CONFIGURED');
+  const p = await pool();
+  const keyHash = rateHash(key);
+  if (p) {
+    const { rows } = await p.query('SELECT attempts, window_started_at FROM auth_rate_limits WHERE key_hash=$1', [keyHash]);
+    const current = rows[0];
+    const windowStarted = current ? new Date(current.window_started_at).getTime() : 0;
+    if (!current || windowStarted <= Date.now() - minutes * 60 * 1000 || Number(current.attempts) < maximum) return { allowed: true, retryAfterSeconds: 0 };
+    return { allowed: false, retryAfterSeconds: Math.max(1, Math.ceil((windowStarted + minutes * 60 * 1000 - Date.now()) / 1000)) };
+  }
+  return localAuthDb.rateLimitStatus(keyHash, maximum, minutes);
+}
+
+async function recordLoginFailures(entries) {
+  const hashes = entries.map(([key, maximum, minutes]) => ({ keyHash: rateHash(key), maximum, minutes }));
+  if (requiresPostgres() && !isPostgresConfigured()) throw new Error('DATABASE_NOT_CONFIGURED');
+  const p = await pool();
+  if (p) {
+    await withDb(async (db) => {
+      for (const { keyHash, minutes } of hashes) {
+        await db.query(`INSERT INTO auth_rate_limits(key_hash,window_started_at,attempts) VALUES($1,now(),1)
+          ON CONFLICT(key_hash) DO UPDATE SET
+            window_started_at=CASE WHEN auth_rate_limits.window_started_at < now()-($2 * interval '1 minute') THEN now() ELSE auth_rate_limits.window_started_at END,
+            attempts=CASE WHEN auth_rate_limits.window_started_at < now()-($2 * interval '1 minute') THEN 1 ELSE auth_rate_limits.attempts+1 END`, [keyHash, minutes]);
+      }
+    });
+    return;
+  }
+  await localAuthDb.recordRateLimits(hashes);
+}
+
+const loginRejectionCodes = new Set([
+  'INVALID_CREDENTIALS', 'RATE_LIMITED', 'ACCOUNT_RESTRICTED', 'VERIFICATION_REQUIRED', 'ACCESS_PENDING',
+  'ACCOUNT_INACTIVE', 'DATABASE_NOT_CONFIGURED', 'DATABASE_URL_INVALID', 'DATABASE_NOT_ALLOWED',
+  'DATABASE_MIGRATION_REQUIRED', 'DATABASE_UNAVAILABLE', 'DATABASE_CREDENTIALS_REJECTED',
+  'DATABASE_NOT_FOUND', 'DATABASE_QUERY_FAILED', 'AUTH_RATE_LIMIT_SECRET_NOT_CONFIGURED', 'INTERNAL_AUTH_ERROR',
+]);
+
+function logLoginRejection(step, reasonCode, status) {
+  const safeStep = /^login\.[a-z_]+$/.test(step) ? step : 'login.request';
+  const safeReason = loginRejectionCodes.has(reasonCode) ? reasonCode : 'INTERNAL_AUTH_ERROR';
+  console.error(JSON.stringify({ event: 'auth.login_rejected', step: safeStep, reasonCode: safeReason, status }));
+}
+
+function loginRejected(step, reasonCode, response) {
+  logLoginRejection(step, reasonCode, response.status);
+  return response;
+}
+
 async function audit(db, userId, event, requestId) {
   if (db && typeof db.query === 'function') {
     try {
@@ -897,16 +947,19 @@ async function login(req, body, requestId) {
   const identifier = typeof body?.identifier === 'string' ? body.identifier.trim() : '';
   const password = typeof body?.password === 'string' ? body.password : '';
   if (!identifier || !password || password.length > 128) {
-    return { status: 401, body: { error: 'Please enter both your email or mobile number and password.', reasonCode: 'INVALID_CREDENTIALS' } };
+    return loginRejected('login.credentials', 'INVALID_CREDENTIALS', { status: 401, body: { error: 'Please enter both your email or mobile number and password.', reasonCode: 'INVALID_CREDENTIALS' } });
   }
 
   // Rate limiting: relaxed in development to prevent lockouts during testing
   const ipMax = isProduction() ? 10 : 500;
   const idMax = isProduction() ? 8 : 500;
-  const ipAllowed = await loginStep('login.rate_limit', () => rateAllowed(`login:ip:${clientIp(req)}`, ipMax, 15));
-  const idAllowed = ipAllowed && await loginStep('login.rate_limit', () => rateAllowed(`login:id:${identifier.toLowerCase()}`, idMax, 15));
-  if (!ipAllowed || !idAllowed) {
-    return genericError(429);
+  const ipKey = `login:ip:${clientIp(req)}`;
+  const idKey = `login:id:${identifier.toLowerCase()}`;
+  const ipLimit = await loginStep('login.rate_limit', () => loginRateStatus(ipKey, ipMax, 15));
+  const idLimit = ipLimit.allowed ? await loginStep('login.rate_limit', () => loginRateStatus(idKey, idMax, 15)) : { allowed: false, retryAfterSeconds: 0 };
+  if (!ipLimit.allowed || !idLimit.allowed) {
+    const retryAfterSeconds = Math.max(ipLimit.retryAfterSeconds, idLimit.retryAfterSeconds, 1);
+    return loginRejected('login.rate_limit', 'RATE_LIMITED', { ...genericError(429), headers: { 'Retry-After': String(retryAfterSeconds) } });
   }
 
   if (requiresPostgres() && !isPostgresConfigured()) {
@@ -944,7 +997,6 @@ async function login(req, body, requestId) {
 
   let user = null;
   let token = null;
-  let ownerPromotionSucceeded = true;
 
   const p = await pool();
   if (p) {
@@ -979,25 +1031,24 @@ async function login(req, body, requestId) {
       user = rows[0];
       if (user) {
         if (user.status === 'LOCKED' || user.status === 'DISABLED') {
-          return { status: 403, body: { error: 'This account has been locked or disabled. Please contact support.', reasonCode: 'ACCOUNT_RESTRICTED' } };
+          return loginRejected('login.account_status', 'ACCOUNT_RESTRICTED', { status: 403, body: { error: 'This account has been locked or disabled. Please contact support.', reasonCode: 'ACCOUNT_RESTRICTED' } });
         }
         const passwordMatches = await loginStep('login.password_verify', () => verifyPassword(password, user.password_salt, user.password_hash));
         if (!passwordMatches) {
-          return { status: 401, body: { error: 'Incorrect email/mobile number or password. Please check your credentials.', reasonCode: 'INVALID_CREDENTIALS' } };
+          await loginStep('login.rate_limit_record', () => recordLoginFailures([[ipKey, ipMax, 15], [idKey, idMax, 15]]));
+          return loginRejected('login.password_verify', 'INVALID_CREDENTIALS', { status: 401, body: { error: 'Incorrect email/mobile number or password. Please check your credentials.', reasonCode: 'INVALID_CREDENTIALS' } });
         }
         if (user.email_verified_at && user.mobile_verified_at) {
           try {
-            ownerPromotionSucceeded = await loginStep('login.owner_promote', () => withDb(async (db) => tryPromoteVerifiedOwner(db, user.id, requestId)));
+            await loginStep('login.owner_promote', () => withDb(async (db) => tryPromoteVerifiedOwner(db, user.id, requestId)));
           } catch (error) {
             const failure = new Error('OWNER_PROMOTION_FAILED', { cause: error });
             failure.authReasonCode = 'OWNER_PROMOTION_FAILED';
             failure.authStep = 'login.owner_promote';
             logAuthFailure(requestId, failure, 'login.owner_promote');
-            ownerPromotionSucceeded = false;
           }
         }
         user = resolveEffectiveRole(user, process.env.OWNER_EMAIL, user.has_conflicting_owner);
-        if (!ownerPromotionSucceeded && user.role === 'owner') user = { ...user, role: 'limited', access_status: 'limited' };
         token = await withDb(async (db) => {
           const session = await loginStep('login.session_insert', () => issueSession(db, user.id));
           await loginStep('login.audit_insert', () => audit(db, user.id, 'LOGIN_SUCCEEDED', requestId));
@@ -1010,24 +1061,31 @@ async function login(req, body, requestId) {
     }
   }
 
+  if (!user && requiresPostgres()) {
+    await loginStep('login.rate_limit_record', () => recordLoginFailures([[ipKey, ipMax, 15], [idKey, idMax, 15]]));
+    return loginRejected('login.account_lookup', 'INVALID_CREDENTIALS', { status: 401, body: { error: 'Incorrect email/mobile number or password. Please check your credentials.' } });
+  }
+
   if (!user && !requiresPostgres()) {
     user = await localAuthDb.findUserByEmailOrMobile(searchEmail, normalizedMobile, cleanDigits10);
     if (!user) {
-      return { status: 401, body: { error: 'Incorrect email/mobile number or password. Please check your credentials.' } };
+      await loginStep('login.rate_limit_record', () => recordLoginFailures([[ipKey, ipMax, 15], [idKey, idMax, 15]]));
+      return loginRejected('login.account_lookup', 'INVALID_CREDENTIALS', { status: 401, body: { error: 'Incorrect email/mobile number or password. Please check your credentials.' } });
     }
     if (user.status === 'LOCKED' || user.status === 'DISABLED') {
-      return { status: 403, body: { error: 'This account has been locked or disabled. Please contact support.', reasonCode: 'ACCOUNT_RESTRICTED' } };
+      return loginRejected('login.account_status', 'ACCOUNT_RESTRICTED', { status: 403, body: { error: 'This account has been locked or disabled. Please contact support.', reasonCode: 'ACCOUNT_RESTRICTED' } });
     }
     const passwordMatches = await loginStep('login.password_verify', () => verifyPassword(password, user.password_salt, user.password_hash));
     if (!passwordMatches) {
-      return { status: 401, body: { error: 'Incorrect email/mobile number or password. Please check your credentials.', reasonCode: 'INVALID_CREDENTIALS' } };
+      await loginStep('login.rate_limit_record', () => recordLoginFailures([[ipKey, ipMax, 15], [idKey, idMax, 15]]));
+      return loginRejected('login.password_verify', 'INVALID_CREDENTIALS', { status: 401, body: { error: 'Incorrect email/mobile number or password. Please check your credentials.', reasonCode: 'INVALID_CREDENTIALS' } });
     }
     if (user.email_verified_at && user.mobile_verified_at) await localAuthDb.promoteConfiguredOwner(user.id);
     const store = localAuthDb.getStore();
     const conflict = store.accounts.some((account) => account.role === 'owner' && account.id !== user.id);
     user = resolveEffectiveRole(user, process.env.OWNER_EMAIL, conflict);
-    token = await localAuthDb.createSession(user.id);
-    await audit(null, user.id, 'LOGIN_SUCCEEDED', requestId);
+    token = await loginStep('login.session_insert', () => localAuthDb.createSession(user.id));
+    await loginStep('login.audit_insert', () => audit(null, user.id, 'LOGIN_SUCCEEDED', requestId));
   }
 
   const complete = hasCompletedLoginVerification(user);
@@ -1304,6 +1362,13 @@ export async function handleAuth(req, action, body = {}) {
   } catch (error) {
     if (act === 'signup') error.authStep ||= 'register.request';
     else error.authStep ||= `${act}.request`;
-    return reportAuthFailure(error, requestId);
+    const result = reportAuthFailure(error, requestId);
+    if (act === 'login' && ['login.session_insert', 'login.audit_insert'].includes(error.authStep)) result.status = 500;
+    if (act === 'login') {
+      const responseReason = result.body?.reasonCode;
+      const rejectionReason = responseReason && responseReason !== 'INTERNAL_AUTH_ERROR' ? responseReason : authFailureCategory(error);
+      logLoginRejection(error.authStep, rejectionReason, result.status);
+    }
+    return result;
   }
 }

@@ -4,6 +4,7 @@ import { industries, insights, navigation, pages, solutions } from '../content/s
 import { emailError, nameError, passwordError, sanitizeNameInput } from '../shared/field-validation.js';
 import FinancialWorkspace from './components/FinancialWorkspace.jsx';
 import { isTransactionPath, canOpenTeamAccessPage, canOpenTransactionPath } from './route-access.js';
+import { loginFailurePresentation } from './auth-login-errors.js';
 
 const route = () => window.location.pathname.replace(/\/$/, '') || '/';
 
@@ -135,7 +136,7 @@ async function authRequest(action, body, method = 'POST') {
     throw new Error('We could not reach the account service. Check that ReachPay is running and try again.');
   }
   const result = await response.json().catch(() => ({}));
-  if (!response.ok) throw Object.assign(new Error(result.error || 'The account service is temporarily unavailable.'), { status: response.status, reasonCode: result.reasonCode });
+  if (!response.ok) throw Object.assign(new Error(result.error || 'The account service is temporarily unavailable.'), { status: response.status, reasonCode: result.reasonCode, retryAfterSeconds: Number(response.headers.get('Retry-After')) || undefined });
   return result;
 }
 const maskEmail = (email = '') => { const [name, domain] = email.split('@'); return name ? `${name.slice(0, 1)}${'•'.repeat(Math.max(2, Math.min(name.length - 1, 6)))}@${domain}` : ''; };
@@ -182,7 +183,12 @@ function AuthPage({ mode, onAuthenticated }) {
   const submitLogin = async (event) => {
     event.preventDefault(); setBusy(true); setError('');
     try { const result = await authRequest('login', login); onAuthenticated?.(result.user); window.location.replace(result.next || '/dashboard'); }
-    catch (err) { setError(err.message); } finally { setBusy(false); }
+    catch (err) {
+      const failure = loginFailurePresentation(err.status, err.reasonCode, err.retryAfterSeconds);
+      setLogin((current) => ({ ...current, password: '' }));
+      setError(failure.message);
+      if (failure.redirect) window.location.replace(failure.redirect);
+    } finally { setBusy(false); }
   };
   const verify = async (channel) => {
     setBusy(true); setError(''); setMessage(''); setActiveChannel(channel);
