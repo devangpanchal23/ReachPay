@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { mock } from 'node:test';
-import { hashOtp, hashPassword, normalizeEmail, normalizeMobile, parseCookies, safeEqualHex, sessionCookie, validateRegistration, verifyPassword } from '../server/auth-core.js';
+import { clearSessionCookie, hashOtp, hashPassword, normalizeEmail, normalizeMobile, parseCookies, safeEqualHex, sessionCookie, validateRegistration, verifyPassword } from '../server/auth-core.js';
 import { authRequestId, errorHasMigrationSignal, handleAuth, rateAllowed, reportAuthFailure, safeAuthErrorResponse, tryPromoteVerifiedOwner } from '../server/auth-controller.js';
 import { databaseConnectionString } from '../server/database-config.js';
 import { validateSmsConfiguration } from '../server/sms/twilio-verify.js';
@@ -78,6 +78,71 @@ test('email OTP code is HMACed before storage and cookies are HTTP-only', () => 
   assert.match(cookie, /HttpOnly/); assert.match(cookie, /Secure/); assert.match(cookie, /SameSite=Lax/);
   assert.equal(parseCookies(`a=b; reachpay_session=${encodeURIComponent('test-token')}`).reachpay_session, 'test-token');
   assert.equal(parseCookies('reachpay_session=%E0%A4%A').reachpay_session, '');
+});
+
+test('Vercel session cookies are secure and use host-only root scope', () => {
+  const previous = { NODE_ENV: process.env.NODE_ENV, VERCEL: process.env.VERCEL };
+  process.env.NODE_ENV = 'test';
+  process.env.VERCEL = '1';
+  try {
+    const cookie = sessionCookie('session-value');
+    assert.match(cookie, /; Path=\//);
+    assert.match(cookie, /; HttpOnly/);
+    assert.match(cookie, /; Secure/);
+    assert.match(cookie, /; SameSite=Lax/);
+    assert.match(cookie, /; Max-Age=604800/);
+    assert.doesNotMatch(cookie, /; Domain=/i);
+    const cleared = clearSessionCookie();
+    assert.match(cleared, /; Secure/);
+    assert.match(cleared, /; Max-Age=0/);
+    assert.doesNotMatch(cleared, /; Domain=/i);
+  } finally {
+    for (const [key, value] of Object.entries(previous)) value === undefined ? delete process.env[key] : process.env[key] = value;
+  }
+});
+
+test('login response session is accepted by /me and frontend guard only redirects on 401', async () => {
+  const source = fs.readFileSync(new URL('../src/site.jsx', import.meta.url), 'utf8');
+  assert.match(source, /credentials: 'same-origin'/);
+  assert.match(source, /onAuthenticated\?\.\(result\.user\); window\.location\.replace\(result\.next \|\| '\/dashboard'\)/);
+  assert.match(source, /if \(error\.status === 401\) window\.location\.replace\('\/auth\/login'\)/);
+  assert.match(source, /We could not confirm your session\. Please reload and try again\./);
+
+  const previous = Object.fromEntries(['NODE_ENV', 'VERCEL', 'DATABASE_URL', 'POSTGRES_URL', 'AUTH_REQUIRE_POSTGRES', 'PUBLIC_SITE_URL'].map((key) => [key, process.env[key]]));
+  process.env.NODE_ENV = 'test';
+  delete process.env.VERCEL;
+  delete process.env.DATABASE_URL;
+  delete process.env.POSTGRES_URL;
+  delete process.env.AUTH_REQUIRE_POSTGRES;
+  process.env.PUBLIC_SITE_URL = 'http://localhost:5173';
+  const email = `session_${Date.now()}@example.test`;
+  const headers = { origin: 'http://localhost:5173', host: 'localhost:5173' };
+  const originalConsoleError = console.error;
+  try {
+    const guardLogs = [];
+    console.error = (line) => guardLogs.push(line);
+    const unauthenticated = await handleAuth({ method: 'GET', headers }, 'me');
+    console.error = originalConsoleError;
+    assert.equal(unauthenticated.status, 401);
+    assert.deepEqual(JSON.parse(guardLogs[0]), { event: 'auth.guard_failure', step: 'auth.me', reasonCode: 'AUTHENTICATION_REQUIRED' });
+
+    const created = await handleAuth({ method: 'POST', headers, socket: { remoteAddress: '198.51.100.41' } }, 'signup', {
+      name: 'Session Test', email, mobile: `9${String(Date.now()).slice(-9)}`, password: 'session-test-password-1', verificationConsent: true,
+    });
+    const sessionCookie = created.headers['Set-Cookie'].split(';')[0];
+    await handleAuth({ method: 'POST', headers: { ...headers, cookie: sessionCookie }, socket: { remoteAddress: '198.51.100.41' } }, 'verify-email', { code: '123456' });
+    await handleAuth({ method: 'POST', headers: { ...headers, cookie: sessionCookie }, socket: { remoteAddress: '198.51.100.41' } }, 'verify-mobile', { code: '123456' });
+    const login = await handleAuth({ method: 'POST', headers, socket: { remoteAddress: '198.51.100.41' } }, 'login', { identifier: email, password: 'session-test-password-1' });
+    assert.equal(login.status, 200);
+    const loginCookie = login.headers['Set-Cookie'].split(';')[0];
+    const me = await handleAuth({ method: 'GET', headers: { ...headers, cookie: loginCookie } }, 'me');
+    assert.equal(me.status, 200);
+    assert.equal(me.body.dashboardAllowed, true);
+    assert.equal(me.body.user.email, email);
+  } finally {
+    console.error = originalConsoleError;
+    for (const [key, value] of Object.entries(previous)) value === undefined ? delete process.env[key] : process.env[key] = value;
+  }
 });
 
 test('auth mutations fail closed when PostgreSQL is explicitly required and not configured', async () => {

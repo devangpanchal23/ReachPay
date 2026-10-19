@@ -135,12 +135,12 @@ async function authRequest(action, body, method = 'POST') {
     throw new Error('We could not reach the account service. Check that ReachPay is running and try again.');
   }
   const result = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(result.error || 'The account service is temporarily unavailable.');
+  if (!response.ok) throw Object.assign(new Error(result.error || 'The account service is temporarily unavailable.'), { status: response.status, reasonCode: result.reasonCode });
   return result;
 }
 const maskEmail = (email = '') => { const [name, domain] = email.split('@'); return name ? `${name.slice(0, 1)}${'•'.repeat(Math.max(2, Math.min(name.length - 1, 6)))}@${domain}` : ''; };
 
-function AuthPage({ mode }) {
+function AuthPage({ mode, onAuthenticated }) {
   const [busy, setBusy] = useState(false); const [error, setError] = useState(''); const [message, setMessage] = useState(() => mode === 'verify' && new URLSearchParams(window.location.search).get('delivery') === 'attention' ? 'Your account was created, but a verification message could not be delivered. Ask the administrator to finish the email/SMS setup, then resend your code here.' : '');
   const [user, setUser] = useState(null); const [code, setCode] = useState(''); const [activeChannel, setActiveChannel] = useState('');
   const [signupAttempted, setSignupAttempted] = useState(false); const [loginAttempted, setLoginAttempted] = useState(false);
@@ -156,8 +156,23 @@ function AuthPage({ mode }) {
     authRequest('me', null, 'GET').then((result) => {
       setUser(result.user);
       if (result.dashboardAllowed) window.location.replace('/dashboard');
-    }).catch(() => window.location.replace('/auth/login'));
+    }).catch((error) => {
+      if (error.status === 401) window.location.replace('/auth/login');
+      else setError('We could not confirm your session. Please try again.');
+    });
   }, [mode, protectedMode]);
+  useEffect(() => {
+    if (mode !== 'login') return undefined;
+    let mounted = true;
+    authRequest('me', null, 'GET').then((result) => {
+      if (!mounted) return;
+      onAuthenticated?.(result.user);
+      window.location.replace(result.dashboardAllowed ? '/dashboard' : '/auth/verify');
+    }).catch((requestError) => {
+      if (mounted && requestError.status !== 401) setError('We could not confirm your session. Please try signing in again.');
+    });
+    return () => { mounted = false; };
+  }, [mode, onAuthenticated]);
   useEffect(() => {
     if (!['signup', 'login'].includes(mode)) return undefined;
     let mounted = true;
@@ -166,7 +181,7 @@ function AuthPage({ mode }) {
   }, [mode]);
   const submitLogin = async (event) => {
     event.preventDefault(); setBusy(true); setError('');
-    try { const result = await authRequest('login', login); window.location.assign(result.next); }
+    try { const result = await authRequest('login', login); onAuthenticated?.(result.user); window.location.replace(result.next || '/dashboard'); }
     catch (err) { setError(err.message); } finally { setBusy(false); }
   };
   const verify = async (channel) => {
@@ -267,6 +282,7 @@ function AuthPage({ mode }) {
 function DashboardPage({ onLogout, onUserLoaded }) {
   const [loading, setLoading] = useState(true);
   const [activeUser, setActiveUser] = useState(null);
+  const [guardError, setGuardError] = useState('');
 
   useEffect(() => {
     let mounted = true;
@@ -281,13 +297,16 @@ function DashboardPage({ onLogout, onUserLoaded }) {
         if (onUserLoaded) onUserLoaded(result.user);
         setLoading(false);
       })
-      .catch(() => {
-        if (mounted) window.location.replace('/auth/login');
+      .catch((error) => {
+        if (!mounted) return;
+        if (error.status === 401) window.location.replace('/auth/login');
+        else { setGuardError('We could not confirm your session. Please reload and try again.'); setLoading(false); }
       });
     return () => { mounted = false; };
   }, [onUserLoaded]);
 
   if (loading || !activeUser) {
+    if (!loading && guardError) return <section className="section"><div className="container"><div className="dashboard-card"><h1>Workspace unavailable</h1><p role="alert">{guardError}</p><button className="button secondary" onClick={() => window.location.reload()}>Try again</button></div></div></section>;
     return (
       <div className="dashboard-full-viewport">
         <div className="dashboard-loading-state">
@@ -433,7 +452,7 @@ export default function App() {
   let content;
   if (path === '/') content = <Home/>;
   else if (path === '/auth/signup') content = <AuthPage mode="signup"/>;
-  else if (path === '/auth/login') content = <AuthPage mode="login"/>;
+  else if (path === '/auth/login') content = <AuthPage mode="login" onAuthenticated={setCurrentUser}/>;
   else if (path === '/auth/verify') content = <AuthPage mode="verify"/>;
   else if (path === '/dashboard') content = <DashboardPage onLogout={handleLogout} onUserLoaded={setCurrentUser}/>;
   else if (path === '/team-access') content = <TeamAccessPage user={currentUser}/>;

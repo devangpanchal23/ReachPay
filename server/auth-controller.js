@@ -254,7 +254,7 @@ export function safeAuthErrorResponse(error, requestId) {
   if (errorHasDatabaseAvailabilitySignal(error)) {
     return { status: 503, body: { error: 'Account service is temporarily unavailable.', reasonCode: authFailureCategory(error) }, ...(headers ? { headers } : {}) };
   }
-  console.error('auth.internal', {
+  if (!error?.authMinimalLogged) console.error('auth.internal', {
     name: error?.name,
     code: error?.code,
     location: extractTopFrame(error),
@@ -264,7 +264,8 @@ export function safeAuthErrorResponse(error, requestId) {
 }
 
 export function reportAuthFailure(error, requestId, context = 'request') {
-  if (String(error?.authStep || '').startsWith('register.')) logRegisterFailure(error, error.authStep);
+  if (error?.authMinimalLogged) { /* Session failure was logged with safe fields at the endpoint. */ }
+  else if (String(error?.authStep || '').startsWith('register.')) logRegisterFailure(error, error.authStep);
   else logAuthFailure(requestId, error, context);
   return safeAuthErrorResponse(error, requestId);
 }
@@ -1180,8 +1181,17 @@ async function resend(req, body, requestId) {
 }
 
 async function me(req) {
-  const user = await currentUser(req);
-  if (!user) return genericError(401);
+  let user;
+  try { user = await currentUser(req); }
+  catch (error) {
+    console.error(JSON.stringify({ event: 'auth.guard_failure', step: 'auth.me', reasonCode: authFailureCategory(error) }));
+    error.authMinimalLogged = true;
+    throw error;
+  }
+  if (!user) {
+    console.error(JSON.stringify({ event: 'auth.guard_failure', step: 'auth.me', reasonCode: 'AUTHENTICATION_REQUIRED' }));
+    return genericError(401);
+  }
   return {
     status: 200,
     body: {

@@ -55,9 +55,10 @@ export function parseCookies(header = '') {
     try { return [key, decodeURIComponent(value)]; } catch { return [key, '']; }
   }));
 }
-export function sessionCookie(token, secure = process.env.NODE_ENV === 'production') {
+const productionCookie = () => process.env.NODE_ENV === 'production' || process.env.VERCEL === '1';
+export function sessionCookie(token, secure = productionCookie()) {
   return `reachpay_session=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=604800${secure ? '; Secure' : ''}`;
 }
-export function clearSessionCookie(secure = process.env.NODE_ENV === 'production') {
+export function clearSessionCookie(secure = productionCookie()) {
   return `reachpay_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${secure ? '; Secure' : ''}`;
 }
