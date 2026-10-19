@@ -13,9 +13,6 @@ BEGIN
   WHERE lower(btrim(email)) = lower(btrim(configured_owner_email))
     AND email_verified_at IS NOT NULL
     AND status = 'ACTIVE'
-    AND (
-      role = 'owner'
-      OR NOT EXISTS (SELECT 1 FROM customer_accounts WHERE role = 'owner')
-    );
+    AND role <> 'owner';
 END
 $$;

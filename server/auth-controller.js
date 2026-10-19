@@ -49,6 +49,7 @@ async function autoMigrate(p) {
       '../database/migrations/005_auth_rate_limit_key_unique.sql',
       '../database/migrations/002_rbac.sql',
       '../database/migrations/003_owner_bootstrap.sql',
+      '../database/migrations/006_multi_owner_member_roles.sql',
       'pos/pos-migration.sql',
       'financial/beneficiary-migration.sql',
       'financial/operations-migration.sql',
@@ -477,7 +478,7 @@ async function promoteVerifiedOwner(db, userId) {
   await db.query("SELECT pg_advisory_xact_lock(hashtext('reachpay.owner.assignment'))");
   await db.query(`UPDATE customer_accounts SET role='owner',access_status='approved',updated_at=now()
     WHERE id=$1 AND lower(btrim(email))=lower(btrim($2)) AND email_verified_at IS NOT NULL AND status='ACTIVE'
-    AND (role='owner' OR NOT EXISTS (SELECT 1 FROM customer_accounts WHERE role='owner'))`, [userId, ownerEmail]);
+    AND role <> 'owner'`, [userId, ownerEmail]);
 }
 
 export async function tryPromoteVerifiedOwner(db, userId, requestId = randomUUID()) {
@@ -527,7 +528,7 @@ async function teamRequest(req, action, body, requestId) {
     let member;
     if (p) {
       const { rows } = await p.query(`INSERT INTO customer_accounts(name,email,mobile_e164,password_hash,password_salt,email_verified_at,status,role,access_status)
-        VALUES($1,$2,NULL,$3,$4,now(),'ACTIVE','limited','pending') ON CONFLICT DO NOTHING
+        VALUES($1,$2,NULL,$3,$4,now(),'ACTIVE','member','pending') ON CONFLICT DO NOTHING
         RETURNING id,name,email,role,access_status AS status,created_at`, [name,email,passwordRecord.hash,passwordRecord.salt]);
       member = rows[0];
       if (member) await p.query("INSERT INTO rbac_audit_events(actor_user_id,target_user_id,event_type,request_id) VALUES($1,$2,'MEMBER_ADDED',$3)",[user.id,member.id,requestId]);
@@ -545,11 +546,16 @@ async function teamRequest(req, action, body, requestId) {
     if (action === 'team-approve' && !await rateAllowed(`team-approve:${user.id}`, 20, 15)) return genericError(429);
     if (p) {
       const transition = memberTransition(action === 'team-approve' ? 'approve' : 'revoke');
-      const { role, status } = transition;
-      const result = await p.query("UPDATE customer_accounts SET role=$2,access_status=$3,updated_at=now() WHERE id=$1 AND role <> 'owner' AND access_status IN ('pending','approved','revoked') RETURNING id",[id,role,status]);
-      if (!result.rowCount) return { status: 404, body: { error: 'MEMBER_NOT_FOUND' } };
-      await p.query('DELETE FROM customer_sessions WHERE user_id=$1',[id]);
-      await p.query('INSERT INTO rbac_audit_events(actor_user_id,target_user_id,event_type,request_id) VALUES($1,$2,$3,$4)',[user.id,id,action === 'team-approve' ? 'MEMBER_APPROVED' : 'MEMBER_REVOKED',requestId]);
+      const changed = await withDb(async (db) => {
+        const found = await db.query("SELECT role,access_status FROM customer_accounts WHERE id=$1 AND role <> 'owner' AND access_status IN ('pending','approved','revoked') FOR UPDATE", [id]);
+        if (!found.rows[0]) return false;
+        const oldRole = found.rows[0].role;
+        await db.query('UPDATE customer_accounts SET role=$2,access_status=$3,updated_at=now() WHERE id=$1', [id, transition.role, transition.status]);
+        await db.query('DELETE FROM customer_sessions WHERE user_id=$1', [id]);
+        await db.query('INSERT INTO rbac_audit_events(actor_user_id,target_user_id,event_type,request_id,old_role,new_role) VALUES($1,$2,$3,$4,$5,$6)', [user.id,id,action === 'team-approve' ? 'MEMBER_APPROVED' : 'MEMBER_REVOKED',requestId,oldRole,transition.role]);
+        return true;
+      });
+      if (!changed) return { status: 404, body: { error: 'MEMBER_NOT_FOUND' } };
       return { status: 200, body: { ok: true } };
     }
     const transition = memberTransition(action === 'team-approve' ? 'approve' : 'revoke');
@@ -578,6 +584,54 @@ async function teamRequest(req, action, body, requestId) {
     return { status: 200, body: { ok: true } };
   }
   return { status: 404, body: { error: 'ROUTE_NOT_FOUND' } };
+}
+
+export async function performOwnerRoleChange(db, actor, action, targetId, password, requestId) {
+  if (actor?.role !== 'owner') return { status: 403, body: { error: 'ACCESS_FORBIDDEN', reasonCode: 'ACCESS_FORBIDDEN' } };
+  if (!['promote', 'demote'].includes(action)) return { status: 400, body: { error: 'OWNER_ACTION_INVALID', reasonCode: 'OWNER_ACTION_INVALID' } };
+  if (!targetId || !/^[0-9a-f-]{36}$/i.test(targetId)) return { status: 400, body: { error: 'OWNER_TARGET_INVALID', reasonCode: 'OWNER_TARGET_INVALID' } };
+  if (targetId === actor.id) return { status: 403, body: { error: 'OWNER_SELF_CHANGE_FORBIDDEN', reasonCode: 'OWNER_SELF_CHANGE_FORBIDDEN' } };
+  await db.query("SELECT pg_advisory_xact_lock(hashtext('reachpay.owner.assignment'))");
+  const actorResult = await db.query('SELECT password_hash,password_salt FROM customer_accounts WHERE id=$1 AND role=\'owner\' AND status=\'ACTIVE\' FOR UPDATE', [actor.id]);
+  const credentials = actorResult.rows[0];
+  if (!credentials || typeof password !== 'string' || !await verifyPassword(password, credentials.password_salt, credentials.password_hash)) {
+    return { status: 401, body: { error: 'OWNER_PASSWORD_INVALID', reasonCode: 'OWNER_PASSWORD_INVALID' } };
+  }
+  const targetResult = await db.query('SELECT id,email,role,status,email_verified_at FROM customer_accounts WHERE id=$1 FOR UPDATE', [targetId]);
+  const target = targetResult.rows[0];
+  if (!target) return { status: 404, body: { error: 'OWNER_TARGET_NOT_FOUND', reasonCode: 'OWNER_TARGET_NOT_FOUND' } };
+  if (action === 'promote' && (target.status !== 'ACTIVE' || !target.email_verified_at)) {
+    return { status: 409, body: { error: 'OWNER_TARGET_NOT_ELIGIBLE', reasonCode: 'OWNER_TARGET_NOT_ELIGIBLE' } };
+  }
+  if (action === 'promote' && target.role === 'owner') return { status: 409, body: { error: 'OWNER_TARGET_ALREADY_OWNER', reasonCode: 'OWNER_TARGET_ALREADY_OWNER' } };
+  if (action === 'demote' && target.role !== 'owner') return { status: 409, body: { error: 'OWNER_TARGET_NOT_OWNER', reasonCode: 'OWNER_TARGET_NOT_OWNER' } };
+  if (action === 'demote') {
+    const countResult = await db.query("SELECT count(*)::int AS count FROM customer_accounts WHERE role='owner' AND status='ACTIVE' AND access_status='approved'");
+    if (Number(countResult.rows[0]?.count || 0) <= 1) return { status: 409, body: { error: 'LAST_OWNER_REQUIRED', reasonCode: 'LAST_OWNER_REQUIRED' } };
+  }
+  const newRole = action === 'promote' ? 'owner' : 'member';
+  const newAccess = action === 'promote' ? 'approved' : 'pending';
+  const event = action === 'promote' ? 'OWNER_PROMOTED' : 'OWNER_DEMOTED';
+  await db.query('UPDATE customer_accounts SET role=$2,access_status=$3,updated_at=now() WHERE id=$1', [target.id,newRole,newAccess]);
+  await db.query('DELETE FROM customer_sessions WHERE user_id=$1', [target.id]);
+  await db.query('INSERT INTO rbac_audit_events(actor_user_id,target_user_id,target_email,event_type,request_id,old_role,new_role) VALUES($1,$2,$3,$4,$5,$6,$7)', [actor.id,target.id,target.email,event,requestId,target.role,newRole]);
+  return { status: 200, body: { ok: true } };
+}
+
+async function ownerManagementRequest(req, action, body, requestId) {
+  const auth = await ownerRequest(req);
+  if (auth.status) return auth;
+  const { user } = auth;
+  try { if (!await rateAllowed(`owner-management:${user.id}`, 10, 15)) return genericError(429); }
+  catch { return { status: 503, body: { error: 'RATE_LIMIT_STORE_UNAVAILABLE' } }; }
+  const p = await pool();
+  if (!p) return { status: 503, body: { error: 'DATABASE_NOT_CONFIGURED', reasonCode: 'DATABASE_NOT_CONFIGURED' } };
+  if (action === 'owners') {
+    const { rows } = await p.query("SELECT id,name,email,role,access_status AS status,created_at FROM customer_accounts WHERE role='owner' OR (role <> 'owner' AND access_status='pending') ORDER BY role DESC,created_at DESC LIMIT 500");
+    return { status: 200, body: { members: rows } };
+  }
+  const result = await withDb((db) => performOwnerRoleChange(db, user, action === 'owner-promote' ? 'promote' : 'demote', String(body?.id || ''), body?.password, requestId));
+  return result;
 }
 
 async function sendEmailCode(user) {
@@ -770,6 +824,8 @@ async function signup(req, body, requestId) {
               mobile_verified_at: null,
               verification_messages_consent_at: new Date().toISOString(),
               status: 'PENDING_VERIFICATION',
+              role: 'member',
+              access_status: 'pending',
               created_at: new Date().toISOString(),
               updated_at: new Date().toISOString(),
             });
@@ -1169,6 +1225,9 @@ function canonicalAction(raw) {
   if (['verifyemail', 'emailverify', 'confirmemail'].includes(norm)) return 'verify-email';
   if (['verifymobile', 'verifyphone', 'phoneverify', 'mobileverify', 'confirmmobile'].includes(norm)) return 'verify-mobile';
   if (['resend', 'resendcode', 'resendotp'].includes(norm)) return 'resend';
+  if (['owners', 'listowners', 'ownerlist'].includes(norm)) return 'owners';
+  if (['promoteowner', 'makeowner'].includes(norm)) return 'owner-promote';
+  if (['demoteowner', 'removeowner'].includes(norm)) return 'owner-demote';
   return String(raw || '').toLowerCase().trim();
 }
 
@@ -1177,10 +1236,10 @@ export async function handleAuth(req, action, body = {}) {
   const act = canonicalAction(action);
   const method = req.method ? req.method.toUpperCase() : 'GET';
 
-  if (!(method === 'GET' && ['me', 'team'].includes(act)) && !originOk(req)) {
+  if (!(method === 'GET' && ['me', 'team', 'owners'].includes(act)) && !originOk(req)) {
     return { status: 403, body: { error: 'Request origin could not be verified.' } };
   }
-  const readActions = new Set(['me', 'signup', 'login', 'verify-email', 'verify-mobile', 'resend']);
+  const readActions = new Set(['me', 'signup', 'login', 'verify-email', 'verify-mobile', 'resend', 'owners']);
   const knownActions = new Set([...readActions, 'logout']);
   if (knownActions.has(act) && (readActions.has(act) ? !['GET', 'POST'].includes(method) : method !== 'POST')) {
     return { status: 405, body: { error: 'METHOD_NOT_ALLOWED' }, headers: { Allow: readActions.has(act) ? 'GET, POST' : 'POST' } };
@@ -1221,6 +1280,10 @@ export async function handleAuth(req, action, body = {}) {
       }
     } else if (act === 'logout') {
       result = await logout(req);
+    } else if (['owners', 'owner-promote', 'owner-demote'].includes(act)) {
+      if (act === 'owners' && method === 'GET') result = await ownerManagementRequest(req, act, body, requestId);
+      else if (act !== 'owners' && method === 'POST') result = await ownerManagementRequest(req, act, body, requestId);
+      else result = { status: 405, body: { error: 'METHOD_NOT_ALLOWED' }, headers: { Allow: act === 'owners' ? 'GET' : 'POST' } };
     } else if (['team','team-approve','team-revoke','team-remove'].includes(act)) {
       result = await teamRequest(req, act, body, requestId);
     } else {

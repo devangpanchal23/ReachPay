@@ -9,7 +9,7 @@ const required = {
   auth_audit_events: ['user_id', 'event_type', 'request_id'],
   phone_otp_challenges: ['user_id', 'provider', 'phone_e164', 'expires_at', 'approved_at'],
   email_otp_challenges: ['user_id', 'code_hmac', 'expires_at', 'attempts', 'consumed_at'],
-  rbac_audit_events: ['actor_user_id', 'target_user_id', 'target_email', 'event_type', 'request_id'],
+  rbac_audit_events: ['actor_user_id', 'target_user_id', 'target_email', 'event_type', 'request_id', 'old_role', 'new_role'],
 };
 
 if (!process.env.DATABASE_URL) {
@@ -74,7 +74,7 @@ if (!process.env.DATABASE_URL) {
       ['customer_accounts_role_check', `SELECT EXISTS (
         SELECT 1 FROM pg_constraint c WHERE c.conrelid = to_regclass('public.customer_accounts')
           AND c.conname = 'customer_accounts_role_check' AND c.contype = 'c' AND c.convalidated
-          AND pg_get_constraintdef(c.oid) ILIKE '%owner%approved_member%limited%'
+          AND pg_get_constraintdef(c.oid) ILIKE '%owner%member%approved_member%limited%'
       ) AS present`],
       ['customer_accounts_access_status_check', `SELECT EXISTS (
         SELECT 1 FROM pg_constraint c WHERE c.conrelid = to_regclass('public.customer_accounts')
@@ -82,17 +82,11 @@ if (!process.env.DATABASE_URL) {
           AND pg_get_constraintdef(c.oid) ILIKE '%approved%pending%revoked%limited%'
       ) AS present`],
     ];
-    const ownerIndex = await pool.query(`SELECT i.indisunique, i.indisvalid,
-        pg_get_indexdef(i.indexrelid) AS definition
-      FROM pg_index i JOIN pg_class x ON x.oid = i.indexrelid
-      WHERE x.relname = 'customer_accounts_single_owner_idx'
-        AND i.indrelid = to_regclass('public.customer_accounts') LIMIT 1`);
-    const ownerIndexDef = String(ownerIndex.rows[0]?.definition || '').toLowerCase().replaceAll('"', '');
-    const ownerIndexPresent = Boolean(ownerIndex.rows[0]?.indisunique && ownerIndex.rows[0]?.indisvalid
-      && /\(\s*role\s*\)/.test(ownerIndexDef)
-      && /where\s*\(?\s*role\s*=\s*'owner'(?:\s*::\s*text)?\s*\)?\s*$/.test(ownerIndexDef));
-    if (!ownerIndexPresent) missingCount += 1;
-    process.stdout.write(`customer_accounts_single_owner_idx: ${ownerIndexPresent ? 'OK' : 'MISSING'}\n`);
+    const multipleOwnersReady = await pool.query(`SELECT NOT EXISTS (
+        SELECT 1 FROM pg_class WHERE relname = 'customer_accounts_single_owner_idx'
+      ) AS present`);
+    if (!multipleOwnersReady.rows[0]?.present) missingCount += 1;
+    process.stdout.write(`customer_accounts_multiple_owner: ${multipleOwnersReady.rows[0]?.present ? 'OK' : 'MISSING'}\n`);
     for (const [name, sql] of checks) {
       const { rows: checkRows } = await pool.query(sql);
       const presentItem = Boolean(checkRows[0]?.present);

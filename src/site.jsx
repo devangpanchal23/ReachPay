@@ -298,7 +298,7 @@ function DashboardPage({ onLogout, onUserLoaded }) {
     );
   }
 
-  if (!['owner', 'approved_member'].includes(activeUser.role)) {
+  if (!['owner', 'member', 'approved_member'].includes(activeUser.role) || (activeUser.role !== 'owner' && activeUser.accessStatus !== 'approved')) {
     return <section className="section"><div className="container"><div className="dashboard-card"><h1>Welcome, {activeUser.name}</h1><p>Your account has limited access. Profile and public pages are available. Transaction features require owner approval.</p><p><strong>Access status:</strong> {activeUser.accessStatus || 'limited'}</p><p><strong>Email:</strong> {activeUser.email}</p><button className="button secondary" onClick={onLogout}>Sign out</button></div></div></section>;
   }
 
@@ -311,22 +311,26 @@ function DashboardPage({ onLogout, onUserLoaded }) {
 
 function TeamAccessPage({ user }) {
   const [members, setMembers] = useState([]);
+  const [owners, setOwners] = useState([]);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [roleTarget, setRoleTarget] = useState(null);
+  const [rolePassword, setRolePassword] = useState('');
   const [notice, setNotice] = useState('');
   const [busy, setBusy] = useState(false);
   const load = async () => {
-    const response = await fetch('/api/auth/team');
-    const payload = await response.json();
-    if (!response.ok) throw new Error(payload.error || 'Unable to load team access.');
-    setMembers(payload.members || []);
+    const [teamResponse, ownerResponse] = await Promise.all([fetch('/api/auth/team'), fetch('/api/auth/owners')]);
+    const [teamPayload, ownerPayload] = await Promise.all([teamResponse.json(), ownerResponse.json()]);
+    if (!teamResponse.ok || !ownerResponse.ok) throw new Error(teamPayload.error || ownerPayload.error || 'Unable to load team access.');
+    setMembers(teamPayload.members || []);
+    setOwners((ownerPayload.members || []).filter((member) => member.role === 'owner'));
   };
   useEffect(() => {
     let active = true;
-    fetch('/api/auth/team').then(async (response) => {
-      const payload = await response.json();
-      if (!response.ok) throw new Error(payload.error || 'Unable to load team access.');
-      if (active) setMembers(payload.members || []);
+    Promise.all([fetch('/api/auth/team'), fetch('/api/auth/owners')]).then(async ([teamResponse, ownerResponse]) => {
+      const [teamPayload, ownerPayload] = await Promise.all([teamResponse.json(), ownerResponse.json()]);
+      if (!teamResponse.ok || !ownerResponse.ok) throw new Error(teamPayload.error || ownerPayload.error || 'Unable to load team access.');
+      if (active) { setMembers(teamPayload.members || []); setOwners((ownerPayload.members || []).filter((member) => member.role === 'owner')); }
     }).catch((error) => { if (active) setNotice(error.message); });
     return () => { active = false; };
   }, []);
@@ -350,12 +354,27 @@ function TeamAccessPage({ user }) {
     } catch (error) { setNotice(error.message); }
     finally { setBusy(false); }
   };
-  if (!canOpenTeamAccessPage(user)) return <section className="section"><div className="container"><div className="dashboard-card"><h1>Access not allowed</h1><p>Team access is available to the owner account only.</p></div></div></section>;
-  return <section className="section"><div className="container"><div className="section-heading"><h1>Team access</h1><p>Add accounts, approve transaction access, or revoke and remove members.</p></div>
+  const changeRole = async () => {
+    if (!roleTarget) return;
+    setBusy(true); setNotice('');
+    try {
+      const endpoint = roleTarget.action === 'promote' ? 'promote-owner' : 'demote-owner';
+      const response = await fetch(`/api/auth/${endpoint}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: roleTarget.member.id, password: rolePassword }) });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || 'Unable to update owner access.');
+      setRoleTarget(null); setRolePassword(''); await load(); setNotice('Owner access updated.');
+    } catch (error) { setNotice(error.message); }
+    finally { setBusy(false); }
+  };
+  if (!canOpenTeamAccessPage(user)) return null;
+  return <section className="section"><div className="container"><div className="section-heading"><h1>Team access</h1><p>Approve transaction access or manage owner roles.</p></div>
     <div className="dashboard-card"><h2>Add a member</h2><form className="auth-form" onSubmit={add}><label>Email<input type="email" autoComplete="email" value={email} onChange={(event) => setEmail(event.target.value)} required maxLength={254}/></label><label>Temporary password<input type="password" autoComplete="new-password" value={password} onChange={(event) => setPassword(event.target.value)} minLength={12} maxLength={128} required/></label><button className="button primary" disabled={busy}>Add pending member</button></form>
       {notice && <p role="status">{notice}</p>}
-      <h2>Members</h2>{members.length ? <div className="table-responsive"><table className="pos-table"><thead><tr><th>Email</th><th>Access</th><th>Added</th><th>Actions</th></tr></thead><tbody>{members.map((member) => <tr key={member.id}><td>{member.email}</td><td>{member.status}</td><td>{new Date(member.created_at).toLocaleDateString()}</td><td>{member.status !== 'approved' && <button className="table-action-btn neutral" disabled={busy} onClick={() => void action('team-approve', member.id)}>Approve</button>}<button className="table-action-btn neutral" disabled={busy} onClick={() => void action('team-revoke', member.id)}>Revoke</button><button className="table-action-btn neutral" disabled={busy} onClick={() => void action('team-remove', member.id)}>Remove</button></td></tr>)}</tbody></table></div> : <p>No members have been added.</p>}
-    </div></div></section>;
+      <h2>Owners</h2>{owners.length ? <div className="table-responsive"><table className="pos-table"><thead><tr><th>Email</th><th>Role</th><th>Added</th><th>Actions</th></tr></thead><tbody>{owners.map((owner) => <tr key={owner.id}><td>{owner.email}</td><td>Owner</td><td>{new Date(owner.created_at).toLocaleDateString()}</td><td>{owner.id !== user.id && <button className="table-action-btn neutral" disabled={busy} onClick={() => { setRoleTarget({ member: owner, action: 'demote' }); setRolePassword(''); }}>Demote owner</button>}</td></tr>)}</tbody></table></div> : <p>No owners found.</p>}
+      <h2>Members</h2>{members.length ? <div className="table-responsive"><table className="pos-table"><thead><tr><th>Email</th><th>Access</th><th>Added</th><th>Actions</th></tr></thead><tbody>{members.map((member) => <tr key={member.id}><td>{member.email}</td><td>{member.status}</td><td>{new Date(member.created_at).toLocaleDateString()}</td><td>{member.status !== 'approved' && <button className="table-action-btn neutral" disabled={busy} onClick={() => void action('team-approve', member.id)}>Approve transaction access</button>}<button className="table-action-btn neutral" disabled={busy} onClick={() => { setRoleTarget({ member, action: 'promote' }); setRolePassword(''); }}>Make owner</button><button className="table-action-btn neutral" disabled={busy} onClick={() => void action('team-revoke', member.id)}>Revoke</button><button className="table-action-btn neutral" disabled={busy} onClick={() => void action('team-remove', member.id)}>Remove</button></td></tr>)}</tbody></table></div> : <p>No members have been added.</p>}
+    </div></div>
+    {roleTarget && <div className="pos-modal-overlay" role="presentation"><div className="pos-modal-content" role="dialog" aria-modal="true" aria-labelledby="owner-confirm-title"><div className="pos-modal-header"><div><h3 id="owner-confirm-title">{roleTarget.action === 'promote' ? 'Make owner' : 'Demote owner'}</h3><p>{roleTarget.member.email}</p></div><button className="table-action-btn neutral" type="button" aria-label="Close" onClick={() => setRoleTarget(null)}><X size={18}/></button></div><div className="pos-modal-body"><p>{roleTarget.action === 'promote' ? 'This account will be able to manage team access.' : 'This account will return to pending member access.'}</p><label className="pos-form-label">Confirm with your password<input type="password" autoComplete="current-password" value={rolePassword} onChange={(event) => setRolePassword(event.target.value)} required/></label><div className="hero-actions"><button className="button secondary" type="button" disabled={busy} onClick={() => setRoleTarget(null)}>Cancel</button><button className="button primary" type="button" disabled={busy || !rolePassword} onClick={() => void changeRole()}>{busy ? 'Saving…' : 'Confirm'}</button></div></div></div></div>}
+  </section>;
 }
 
 function AccessDeniedPage() { return <section className="section"><div className="container"><div className="dashboard-card"><h1>Access not allowed</h1><p>Transaction features are available only to the owner and approved members.</p><a className="button secondary" href="/dashboard">Go to dashboard</a></div></div></section>; }

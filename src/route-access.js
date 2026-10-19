@@ -4,7 +4,7 @@ export function isTransactionPath(path) {
 }
 
 export function canOpenTransactionPath(path, user) {
-  return !isTransactionPath(path) || Boolean(user && ['owner', 'approved_member'].includes(user.role)
+  return !isTransactionPath(path) || Boolean(user && ['owner', 'member', 'approved_member'].includes(user.role)
     && (user.role === 'owner' || user.accessStatus === 'approved'));
 }
 

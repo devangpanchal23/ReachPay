@@ -9,7 +9,7 @@ export default async function unavailableFinancialApi(request, response) {
   try { user = await currentUser(request); }
   catch { return response.status(503).json({ error: 'AUTHENTICATION_STORE_UNAVAILABLE', requestId: randomUUID() }); }
   if (!user) return response.status(401).json({ error: 'AUTHENTICATION_REQUIRED', requestId: randomUUID() });
-  if (user.status !== 'ACTIVE' || !['owner', 'approved_member'].includes(user.role) || (user.role === 'approved_member' && user.access_status !== 'approved')) {
+  if (user.status !== 'ACTIVE' || !['owner', 'member', 'approved_member'].includes(user.role) || (user.role !== 'owner' && user.access_status !== 'approved')) {
     return response.status(403).json({ error: 'ACCESS_FORBIDDEN', requestId: randomUUID() });
   }
   return response.status(503).json({

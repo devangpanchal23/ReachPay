@@ -110,8 +110,8 @@ export const localAuthDb = {
       mobile_verified_at: autoVerify ? now : null,
       verification_messages_consent_at: now,
       status: autoVerify ? 'ACTIVE' : 'PENDING_VERIFICATION',
-      role: 'limited',
-      access_status: 'limited',
+      role: 'member',
+      access_status: 'pending',
       created_at: now,
       updated_at: now,
     };
@@ -133,7 +133,6 @@ export const localAuthDb = {
     const email = String(process.env.OWNER_EMAIL || '').trim().toLowerCase();
     if (!email) return false;
     const store = loadStore();
-    if (store.accounts.some((u) => u.role === 'owner')) return false;
     const user = store.accounts.find((u) => u.id === id && u.email?.trim().toLowerCase() === email && u.email_verified_at && u.status === 'ACTIVE');
     if (!user) return false;
     user.role = 'owner'; user.access_status = 'approved'; user.updated_at = new Date().toISOString(); saveStore();
@@ -145,7 +144,7 @@ export const localAuthDb = {
     if (store.accounts.some((u) => u.email?.trim().toLowerCase() === email)) return null;
     const now = new Date().toISOString();
     const user = { id: randomUUID(), name, email, mobile_e164: null, password_hash: passwordHash, password_salt: passwordSalt,
-      email_verified_at: now, mobile_verified_at: null, verification_messages_consent_at: now, status: 'ACTIVE', role: 'limited',
+      email_verified_at: now, mobile_verified_at: null, verification_messages_consent_at: now, status: 'ACTIVE', role: 'member',
       access_status: 'pending', created_at: now, updated_at: now };
     store.accounts.push(user);
     saveStore();

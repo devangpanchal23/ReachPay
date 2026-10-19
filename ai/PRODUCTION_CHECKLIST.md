@@ -9,7 +9,7 @@ Set server variables in **Vercel Project Settings > Environment Variables**. Put
 | Variables | Where | Required / notes | Status |
 |---|---|---|---|
 | `DATABASE_URL` | Vercel | Required PostgreSQL connection string for production auth and data. Neon `*.neon.tech` pooled and direct hosts are supported. | To be confirmed |
-| `OWNER_EMAIL` | Vercel | Required. Set to `devangpan23@gmail.com`; account must be verified before owner bootstrap. | To be confirmed |
+| `OWNER_EMAIL` | Vercel | Required server-side owner bootstrap email. Example: `devangpanchal23052006@gmail.com`; matching account must be active and email verified. | To be confirmed |
 | `AUTH_OTP_SECRET`, `AUTH_RATE_LIMIT_SECRET`, `BENEFICIARY_ENCRYPTION_KEY` | Vercel | Required for production auth, OTP/rate limits, and beneficiary encryption. Generate strong independent values and preserve encryption keys. | To be confirmed |
 | `FUNDING_SOURCE_ENCRYPTION_KEY`, `DMT_DATA_ENCRYPTION_KEY` | Vercel | Required before enabling storage for the corresponding feature. | To be confirmed |
 | `PUBLIC_SITE_URL`, `APP_ORIGIN` | Vercel | Set to the verified HTTPS production origin. `PUBLIC_SITE_URL` is used by the build. | To be confirmed |
@@ -38,7 +38,7 @@ Set server variables in **Vercel Project Settings > Environment Variables**. Put
 
 | Check | Status | Evidence / next action |
 |---|---|---|
-| Vercel `OWNER_EMAIL` matches `devangpan23@gmail.com` | To be confirmed | Verify in Vercel settings. |
+| Vercel `OWNER_EMAIL` matches configured owner account | To be confirmed | Verify in Vercel settings. |
 | Production PostgreSQL provisioned, reachable, and private | To be confirmed | Verify the production `DATABASE_URL` and access policy. |
 | All database migrations applied and repeatable | Done locally | CI and local audit run migrations twice against disposable PostgreSQL. Production migration still needs to run. |
 | Database backups and restore test | To be confirmed | Confirm schedule, retention, and a tested restore. |

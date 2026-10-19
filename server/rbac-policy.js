@@ -1,7 +1,7 @@
 export function hasTransactionAccess(user) {
   if (!user || user.status !== 'ACTIVE' || !user.email_verified_at || !user.mobile_verified_at) return false;
   if (user.role === 'owner') return true;
-  return user.role === 'approved_member' && user.access_status === 'approved';
+  return ['member', 'approved_member'].includes(user.role) && user.access_status === 'approved';
 }
 
 export function canManageTeam(user) {
@@ -12,27 +12,24 @@ export function hasCompletedLoginVerification(user) {
   return Boolean(user && user.status === 'ACTIVE' && user.email_verified_at && user.mobile_verified_at);
 }
 
-export function resolveEffectiveRole(user, ownerEmail, hasConflictingOwner = false) {
+export function resolveEffectiveRole(user) {
   if (!user) return null;
-  const configuredEmail = String(ownerEmail || '').trim().toLowerCase();
-  const accountEmail = String(user.email || '').trim().toLowerCase();
   if (!user.email_verified_at || !user.mobile_verified_at) return { ...user, role: 'limited', access_status: 'limited' };
-  const storedOwnerIsProtected = user.role === 'owner' && accountEmail && user.status === 'ACTIVE' && !hasConflictingOwner;
-  if (storedOwnerIsProtected) return { ...user, role: 'owner', access_status: 'approved' };
-  const verifiedOwner = Boolean(configuredEmail && accountEmail === configuredEmail && user.email_verified_at && user.status === 'ACTIVE');
-
-  if (verifiedOwner && !hasConflictingOwner) {
+  if (user.role === 'owner' && user.status === 'ACTIVE') {
     return { ...user, role: 'owner', access_status: 'approved' };
   }
   if (user.role === 'owner') return { ...user, role: 'limited', access_status: 'limited' };
-  if (user.role === 'approved_member' && user.access_status === 'approved') return user;
-  return { ...user, role: 'limited' };
+  if (user.role === 'member' && user.access_status === 'approved') return user;
+  if (user.role === 'approved_member' && user.access_status === 'approved') return { ...user, role: 'member' };
+  if (['member', 'approved_member'].includes(user.role)) return { ...user, role: 'member', access_status: user.access_status || 'pending' };
+  if (user.role === 'limited') return user;
+  return { ...user, role: 'limited', access_status: user.access_status || 'limited' };
 }
 
 export function memberTransition(action, currentRole) {
   if (currentRole === 'owner') return null;
-  if (action === 'approve') return { role: 'approved_member', status: 'approved' };
-  if (action === 'revoke') return { role: 'limited', status: 'revoked' };
+  if (action === 'approve') return { role: 'member', status: 'approved' };
+  if (action === 'revoke') return { role: 'member', status: 'revoked' };
   return null;
 }
 
@@ -41,5 +38,5 @@ export function mayRemoveAccount(role) {
 }
 
 export function mayAssignOwner(existingOwnerCount) {
-  return existingOwnerCount === 0;
+  return Number.isInteger(existingOwnerCount) && existingOwnerCount >= 0;
 }

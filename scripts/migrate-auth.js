@@ -16,6 +16,7 @@ if (!process.env.DATABASE_URL) {
     ['owner account bootstrap', new URL('../database/migrations/003_owner_bootstrap.sql', import.meta.url)],
     ['SMS resend limit support', new URL('../database/migrations/004_sms_resend_limits.sql', import.meta.url)],
     ['Auth rate-limit key uniqueness', new URL('../database/migrations/005_auth_rate_limit_key_unique.sql', import.meta.url)],
+    ['multiple owners and member roles', new URL('../database/migrations/006_multi_owner_member_roles.sql', import.meta.url)],
   ];
   const pool = new pg.Pool(postgresPoolConfig(process.env.DATABASE_URL, { production: process.env.NODE_ENV === 'production', max: 1, connectionTimeoutMillis: 5000 }));
   let client;
