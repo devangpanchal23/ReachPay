@@ -11,13 +11,21 @@ const storeFile = path.join(dataDir, 'reachpay-auth.json');
 
 let inMemoryStore = null;
 
+function assertLocalStoreEnabled() {
+  if (process.env.NODE_ENV === 'production' || process.env.VERCEL) {
+    throw new Error('AUTH_LOCAL_STORE_DISABLED');
+  }
+}
+
 function ensureDataDir() {
+  assertLocalStoreEnabled();
   if (!fs.existsSync(dataDir)) {
     fs.mkdirSync(dataDir, { recursive: true });
   }
 }
 
 function loadStore() {
+  assertLocalStoreEnabled();
   if (inMemoryStore) return inMemoryStore;
   ensureDataDir();
   if (fs.existsSync(storeFile)) {
@@ -47,6 +55,7 @@ function createEmptyStore() {
 }
 
 function saveStore() {
+  assertLocalStoreEnabled();
   if (!inMemoryStore) return;
   ensureDataDir();
   const tmpFile = `${storeFile}.${process.pid}.${Date.now()}.tmp`;

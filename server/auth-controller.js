@@ -14,8 +14,14 @@ function isPostgresConfigured() {
   return Boolean(process.env.DATABASE_URL && process.env.DATABASE_URL.trim().length > 0);
 }
 
-const isProduction = () => process.env.NODE_ENV === 'production';
+const isProduction = () => process.env.NODE_ENV === 'production' || Boolean(process.env.VERCEL);
 const requiresPostgres = () => isProduction() || process.env.AUTH_REQUIRE_POSTGRES === 'true';
+
+function authStorageUnavailable(reasonCode) {
+  const error = new Error('AUTH_STORAGE_UNAVAILABLE');
+  error.authReasonCode = reasonCode;
+  return error;
+}
 
 export function authRequestId(value) {
   return typeof value === 'string' && /^[A-Za-z0-9._:-]{1,100}$/.test(value) ? value : randomUUID();
@@ -1120,15 +1126,24 @@ async function me(req) {
 async function logout(req) {
   const token = parseCookies(req.headers?.cookie).reachpay_session;
   if (token) {
-    if (requiresPostgres() || isPostgresConfigured()) {
+    if (requiresPostgres()) {
+      if (!isPostgresConfigured()) throw authStorageUnavailable('DATABASE_NOT_CONFIGURED');
+      const p = await pool();
+      if (!p) throw authStorageUnavailable('DATABASE_UNAVAILABLE');
+      try {
+        await p.query('DELETE FROM customer_sessions WHERE token_hash=$1', [hashToken(token)]);
+      } catch (error) {
+        throw databaseOperationError(error);
+      }
+    } else if (isPostgresConfigured()) {
       try {
         const p = await pool();
         if (p) await p.query('DELETE FROM customer_sessions WHERE token_hash=$1', [hashToken(token)]);
-      } catch (error) {
-        if (requiresPostgres()) throw databaseOperationError(error);
+      } catch {
+        // Local development may use its JSON session store when PostgreSQL is unavailable.
       }
     }
-    await localAuthDb.deleteSession(token);
+    if (!requiresPostgres()) await localAuthDb.deleteSession(token);
   }
   return { status: 200, headers: { 'Set-Cookie': clearSessionCookie() }, body: { ok: true } };
 }

@@ -1,5 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import { mock } from 'node:test';
 import { hashOtp, hashPassword, normalizeEmail, normalizeMobile, parseCookies, safeEqualHex, sessionCookie, validateRegistration, verifyPassword } from '../server/auth-core.js';
 import { authRequestId, errorHasMigrationSignal, handleAuth, rateAllowed, reportAuthFailure, safeAuthErrorResponse, tryPromoteVerifiedOwner } from '../server/auth-controller.js';
 import { validateSmsConfiguration } from '../server/sms/twilio-verify.js';
@@ -89,6 +91,30 @@ test('auth mutations fail closed when PostgreSQL is explicitly required and not 
     if (previousReq === undefined) delete process.env.AUTH_REQUIRE_POSTGRES; else process.env.AUTH_REQUIRE_POSTGRES = previousReq;
     if (previousUrl === undefined) delete process.env.DATABASE_URL; else process.env.DATABASE_URL = previousUrl;
     if (previousOrigin === undefined) delete process.env.PUBLIC_SITE_URL; else process.env.PUBLIC_SITE_URL = previousOrigin;
+  }
+});
+
+test('production Vercel login and logout do not create or use the local auth filesystem store', async () => {
+  const keys = ['NODE_ENV', 'VERCEL', 'DATABASE_URL', 'AUTH_REQUIRE_POSTGRES', 'AUTH_RATE_LIMIT_SECRET'];
+  const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+  const mkdirSync = mock.method(fs, 'mkdirSync');
+  process.env.NODE_ENV = 'production';
+  process.env.VERCEL = '1';
+  delete process.env.DATABASE_URL;
+  delete process.env.AUTH_REQUIRE_POSTGRES;
+  delete process.env.AUTH_RATE_LIMIT_SECRET;
+  try {
+    const headers = { origin: 'http://localhost:5173', host: 'localhost:5173' };
+    const login = await handleAuth({ method: 'POST', headers }, 'login', { identifier: 'person@example.test', password: 'test-password' });
+    assert.equal(login.status, 500);
+    assert.deepEqual(login.body, { error: 'The account service could not complete the request.', reasonCode: 'INTERNAL_AUTH_ERROR' });
+    const logout = await handleAuth({ method: 'POST', headers: { ...headers, cookie: 'reachpay_session=fake-session-token' } }, 'logout', {});
+    assert.equal(logout.status, 500);
+    assert.deepEqual(logout.body, { error: 'The account service could not complete the request.', reasonCode: 'INTERNAL_AUTH_ERROR' });
+    assert.equal(mkdirSync.mock.callCount(), 0);
+  } finally {
+    mkdirSync.mock.restore();
+    for (const [key, value] of Object.entries(previous)) value === undefined ? delete process.env[key] : process.env[key] = value;
   }
 });
 
@@ -222,7 +248,7 @@ test('login returns 429 when its shared IP limit is exhausted', async () => {
   delete process.env.DATABASE_URL;
   delete process.env.AUTH_REQUIRE_POSTGRES;
   process.env.PUBLIC_SITE_URL = 'http://localhost:5173';
-  const ip = `198.51.100.${Math.floor(Math.random() * 200) + 1}`;
+  const ip = `198.51.100.${Date.now()}-${Math.random().toString(16).slice(2)}`;
   try {
     for (let attempt = 0; attempt < 500; attempt += 1) assert.equal(await rateAllowed(`login:ip:${ip}`, 500, 15), true);
     const result = await handleAuth({ method: 'POST', headers: { origin: 'http://localhost:5173', host: 'localhost:5173' }, socket: { remoteAddress: ip } }, 'login', { identifier: 'rate-limit@example.test', password: 'test-password' });
